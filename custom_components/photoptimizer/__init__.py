@@ -123,6 +123,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def _async_handle_startup() -> None:
         """Run startup sequence: optimize, publish."""
         _LOGGER.debug("Startup started")
+        coordinator.enable_ml_pipeline()
         await _async_handle_mpc_cycle()
         _LOGGER.debug("Startup bootstrap cycle finished")
 

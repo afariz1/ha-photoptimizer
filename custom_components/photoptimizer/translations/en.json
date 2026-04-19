@@ -62,6 +62,7 @@
                     "growatt_device_id": "Growatt device (optional)",
                     "growatt_inverter_variant": "Growatt inverter variant",
                     "inverter_charge_power_entity": "Inverter charge power entity (optional)",
+                    "inverter_command_only": "Log commands only (no inverter control)",
                     "inverter_discharge_power_entity": "Inverter discharge power entity",
                     "inverter_mode_entity": "Inverter operation mode entity",
                     "wear_cost_per_kwh": "Battery wear cost (per kWh)"
@@ -82,22 +83,13 @@
                     "growatt_device_id": "Optional Growatt device for direct growatt_server service calls.",
                     "growatt_inverter_variant": "Select MIN/SPH if known; otherwise keep Auto.",
                     "inverter_charge_power_entity": "Optional number entity used for inverter charging power percentage.",
+                    "inverter_command_only": "Enable to skip all inverter control entities and only log planned commands to debug output.",
                     "inverter_discharge_power_entity": "Number entity used for inverter discharging power percentage.",
                     "inverter_mode_entity": "Select entity used to set inverter operating mode (for example general, eco_charge, eco_discharge).",
                     "wear_cost_per_kwh": "Optional battery degradation penalty per cycled kWh."
                 },
                 "description": "Select inverter entities. Household load is used for current load and EMHASS ML load forecast from history.",
                 "title": "Configure inverter data"
-            },
-            "inverter_connection": {
-                "data": {
-                    "connect_inverter_entities": "Connect inverter entities"
-                },
-                "data_description": {
-                    "connect_inverter_entities": "Enable this to bind GoodWe or Growatt entities. Disable it to run in command-only mode and log the commands instead of calling inverter entities."
-                },
-                "description": "Choose whether Photoptimizer should connect to inverter entities or only print the commands it would send.",
-                "title": "Configure inverter connection mode"
             },
             "inverter_type": {
                 "data": {

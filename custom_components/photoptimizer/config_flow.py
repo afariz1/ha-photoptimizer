@@ -20,7 +20,6 @@ from .const import (
     CONF_BATTERY_SOC_ENTITY,
     CONF_BATTERY_SOC_RESERVE_PERCENT,
     CONF_BATTERY_TARGET_SOC_PERCENT,
-    CONF_CONNECT_INVERTER_ENTITIES,
     CONF_CURRENT_CONSUMPTION_ENTITY,
     CONF_CURRENT_SOLAR_PRODUCTION_ENTITY,
     CONF_DECLINATION,
@@ -36,6 +35,7 @@ from .const import (
     CONF_GROWATT_DEVICE_ID,
     CONF_GROWATT_INVERTER_VARIANT,
     CONF_INVERTER_CHARGE_POWER_ENTITY,
+    CONF_INVERTER_COMMAND_ONLY,
     CONF_INVERTER_DISCHARGE_POWER_ENTITY,
     CONF_INVERTER_MODE_ENTITY,
     CONF_INVERTER_TYPE,
@@ -229,7 +229,7 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 _redact_user_input(user_input),
             )
             self._data.update(user_input)
-            return await self.async_step_inverter_connection()
+            return await self.async_step_inverter()
 
         data_schema = vol.Schema(
             {
@@ -257,55 +257,11 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    async def async_step_inverter_connection(
-        self, user_input: dict[str, Any] | None = None
-    ) -> config_entries.ConfigFlowResult:
-        """Choose whether to connect inverter entities or only print commands."""
-        errors: dict[str, str] = {}
-
-        if user_input is not None:
-            _LOGGER.debug(
-                "Inverter connection step received input: %s",
-                _redact_user_input(user_input),
-            )
-            self._data[CONF_CONNECT_INVERTER_ENTITIES] = user_input[
-                CONF_CONNECT_INVERTER_ENTITIES
-            ]
-            if not user_input[CONF_CONNECT_INVERTER_ENTITIES]:
-                _LOGGER.debug(
-                    "Command-only mode selected; inverter control entities will be skipped"
-                )
-            return await self.async_step_inverter()
-
-        data_schema = vol.Schema(
-            {
-                vol.Required(CONF_CONNECT_INVERTER_ENTITIES, default=True): bool,
-            }
-        )
-
-        return self.async_show_form(
-            step_id="inverter_connection",
-            data_schema=data_schema,
-            errors=errors,
-        )
-
     async def async_step_inverter(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
         """Handle inverter configuration step."""
         errors: dict[str, str] = {}
-
-        if user_input is not None:
-            _LOGGER.debug(
-                "Inverter step received input: %s",
-                _redact_user_input(user_input),
-            )
-            self._data.update(user_input)
-            _LOGGER.debug("Inverter data step completed")
-
-            return await self.async_step_deferrable_load_count()
-
-        _LOGGER.debug("Showing inverter form")
 
         data_fields: dict[Any, Any] = {
             vol.Required(CONF_CURRENT_SOLAR_PRODUCTION_ENTITY): selector.EntitySelector(
@@ -355,83 +311,100 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             vol.Optional(CONF_EMHASS_TOKEN): selector.TextSelector(
                 selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
             ),
+            vol.Required(
+                CONF_INVERTER_COMMAND_ONLY,
+                default=False,
+            ): selector.BooleanSelector(),
+            vol.Optional(CONF_INVERTER_MODE_ENTITY): selector.EntitySelector(
+                selector.EntitySelectorConfig(
+                    domain=["select"],
+                    multiple=False,
+                )
+            ),
+            vol.Optional(CONF_INVERTER_CHARGE_POWER_ENTITY): selector.EntitySelector(
+                selector.EntitySelectorConfig(
+                    domain=["number"],
+                    multiple=False,
+                )
+            ),
+            vol.Optional(CONF_INVERTER_DISCHARGE_POWER_ENTITY): selector.EntitySelector(
+                selector.EntitySelectorConfig(
+                    domain=["number"],
+                    multiple=False,
+                )
+            ),
         }
 
         inverter_type = self._data.get(CONF_INVERTER_TYPE)
-        connect_inverter_entities = self._data.get(CONF_CONNECT_INVERTER_ENTITIES, True)
-
-        if connect_inverter_entities:
+        if inverter_type == INVERTER_TYPE_GROWATT:
             data_fields.update(
                 {
-                    vol.Required(CONF_INVERTER_MODE_ENTITY): selector.EntitySelector(
+                    vol.Optional(
+                        CONF_GROWATT_AC_CHARGE_SWITCH_ENTITY
+                    ): selector.EntitySelector(
                         selector.EntitySelectorConfig(
-                            domain=["select"],
+                            domain=["switch"],
                             multiple=False,
                         )
+                    ),
+                    vol.Optional(CONF_GROWATT_DEVICE_ID): selector.DeviceSelector(
+                        selector.DeviceSelectorConfig(integration="growatt_server")
                     ),
                     vol.Optional(
-                        CONF_INVERTER_CHARGE_POWER_ENTITY
-                    ): selector.EntitySelector(
-                        selector.EntitySelectorConfig(
-                            domain=["number"],
-                            multiple=False,
-                        )
-                    ),
-                    vol.Required(
-                        CONF_INVERTER_DISCHARGE_POWER_ENTITY
-                    ): selector.EntitySelector(
-                        selector.EntitySelectorConfig(
-                            domain=["number"],
-                            multiple=False,
+                        CONF_GROWATT_INVERTER_VARIANT,
+                        default=GROWATT_VARIANT_AUTO,
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                selector.SelectOptionDict(
+                                    value=GROWATT_VARIANT_AUTO,
+                                    label="Auto",
+                                ),
+                                selector.SelectOptionDict(
+                                    value=GROWATT_VARIANT_MIN,
+                                    label="MIN",
+                                ),
+                                selector.SelectOptionDict(
+                                    value=GROWATT_VARIANT_SPH,
+                                    label="SPH",
+                                ),
+                            ],
+                            mode=selector.SelectSelectorMode.DROPDOWN,
                         )
                     ),
                 }
             )
 
-            if inverter_type == INVERTER_TYPE_GROWATT:
-                data_fields.update(
-                    {
-                        vol.Optional(
-                            CONF_GROWATT_AC_CHARGE_SWITCH_ENTITY
-                        ): selector.EntitySelector(
-                            selector.EntitySelectorConfig(
-                                domain=["switch"],
-                                multiple=False,
-                            )
-                        ),
-                        vol.Optional(CONF_GROWATT_DEVICE_ID): selector.DeviceSelector(
-                            selector.DeviceSelectorConfig(integration="growatt_server")
-                        ),
-                        vol.Optional(
-                            CONF_GROWATT_INVERTER_VARIANT,
-                            default=GROWATT_VARIANT_AUTO,
-                        ): selector.SelectSelector(
-                            selector.SelectSelectorConfig(
-                                options=[
-                                    selector.SelectOptionDict(
-                                        value=GROWATT_VARIANT_AUTO,
-                                        label="Auto",
-                                    ),
-                                    selector.SelectOptionDict(
-                                        value=GROWATT_VARIANT_MIN,
-                                        label="MIN",
-                                    ),
-                                    selector.SelectOptionDict(
-                                        value=GROWATT_VARIANT_SPH,
-                                        label="SPH",
-                                    ),
-                                ],
-                                mode=selector.SelectSelectorMode.DROPDOWN,
-                            )
-                        ),
-                    }
-                )
-        else:
-            _LOGGER.debug(
-                "Command-only mode active; not requesting inverter control entities"
-            )
-
         data_schema = vol.Schema(data_fields)
+
+        if user_input is not None:
+            _LOGGER.debug(
+                "Inverter step received input: %s",
+                _redact_user_input(user_input),
+            )
+            if not user_input.get(CONF_INVERTER_COMMAND_ONLY, False):
+                if not user_input.get(CONF_INVERTER_MODE_ENTITY):
+                    errors[CONF_INVERTER_MODE_ENTITY] = "required"
+                if not user_input.get(CONF_INVERTER_DISCHARGE_POWER_ENTITY):
+                    errors[CONF_INVERTER_DISCHARGE_POWER_ENTITY] = "required"
+
+            if errors:
+                _LOGGER.debug("Inverter step validation errors: %s", errors)
+                return self.async_show_form(
+                    step_id="inverter",
+                    data_schema=self.add_suggested_values_to_schema(
+                        data_schema,
+                        user_input,
+                    ),
+                    errors=errors,
+                )
+
+            self._data.update(user_input)
+            _LOGGER.debug("Inverter data step completed")
+
+            return await self.async_step_deferrable_load_count()
+
+        _LOGGER.debug("Showing inverter form")
 
         return self.async_show_form(
             step_id="inverter",

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 import logging
 import math
 from numbers import Real
+import time
 from typing import Any
 
 from aiohttp import ClientError, ClientTimeout
@@ -32,8 +34,14 @@ DEFAULT_BATTERY_MAXIMUM_STATE_OF_CHARGE = 0.9
 DEFAULT_ML_HISTORIC_DAYS = 9
 DEFAULT_ML_MODEL_TYPE = "photoptimizer_load"
 DEFAULT_ML_SKLEARN_MODEL = "RandomForestRegressor"
-DEFAULT_ML_NUM_LAGS = 48
+DEFAULT_ML_NUM_LAGS = 96
 DEFAULT_ML_SPLIT_DATE_DELTA = "48h"
+DEFAULT_ML_BASE_STEP_MINUTES = 15
+DEFAULT_ML_PREDICT_PUBLISH_ENTITY_ID = "sensor.p_load_forecast_custom_model"
+DEFAULT_ML_PREDICT_PUBLISH_UNIT = "W"
+DEFAULT_ML_PREDICT_PUBLISH_NAME = "Load Power Forecast custom ML model"
+DEFAULT_ML_PREDICT_READBACK_TIMEOUT_SECONDS = 20
+DEFAULT_ML_PREDICT_READBACK_POLL_SECONDS = 0.5
 _SLOT_POWER_THRESHOLD_W = 50.0
 
 
@@ -337,6 +345,89 @@ class EmhassClient:
             return values[:expected_points]
 
         return []
+
+    def _ml_num_lags_for_step(self, optimization_time_step_minutes: int) -> int:
+        """Return one-day lag count for a given optimization step."""
+        if optimization_time_step_minutes <= 0:
+            return DEFAULT_ML_NUM_LAGS
+
+        return max(1, int((24 * 60) / optimization_time_step_minutes))
+
+    def _extract_forecast_from_ml_publish_attributes(
+        self,
+        attributes: dict[str, Any],
+        expected_points: int,
+    ) -> list[float]:
+        """Extract ML forecast values from a published Home Assistant sensor."""
+        table = attributes.get("forecasts")
+        if isinstance(table, list):
+            schedule = self._extract_schedule(table, value_key="p_load_forecast")
+            values = [value for _, value in schedule]
+            if len(values) >= expected_points:
+                return values[:expected_points]
+
+            # Fallback for custom key names emitted by some EMHASS versions.
+            values = []
+            for row in table:
+                if not isinstance(row, dict):
+                    continue
+
+                numeric: float | None = None
+                for row_key, row_value in row.items():
+                    if row_key == "date":
+                        continue
+                    numeric = self._coerce_float(row_value)
+                    if numeric is not None:
+                        break
+
+                if numeric is not None:
+                    values.append(numeric)
+
+            if len(values) >= expected_points:
+                return values[:expected_points]
+
+        # Final defensive fallback for unknown attribute layouts.
+        values = self._extract_numeric_list(attributes)
+        if len(values) >= expected_points:
+            return values[:expected_points]
+
+        return []
+
+    async def _async_read_ml_predict_sensor(
+        self,
+        *,
+        entity_id: str,
+        expected_points: int,
+        timeout_seconds: int = DEFAULT_ML_PREDICT_READBACK_TIMEOUT_SECONDS,
+        poll_seconds: float = DEFAULT_ML_PREDICT_READBACK_POLL_SECONDS,
+    ) -> list[float] | None:
+        """Read ML predict values from a published Home Assistant sensor."""
+        deadline = time.monotonic() + timeout_seconds
+
+        while time.monotonic() < deadline:
+            state = self._hass.states.get(entity_id)
+            if state is not None:
+                values = self._extract_forecast_from_ml_publish_attributes(
+                    dict(state.attributes),
+                    expected_points,
+                )
+                if values:
+                    _LOGGER.debug(
+                        "Read ML predict values from %s: points=%s",
+                        entity_id,
+                        len(values),
+                    )
+                    return values
+
+            await self._hass.async_block_till_done()
+            await asyncio.sleep(poll_seconds)
+
+        _LOGGER.debug(
+            "Timed out waiting for ML predict sensor=%s points=%s",
+            entity_id,
+            expected_points,
+        )
+        return None
 
     def _build_runtimeparams(self, inputs: OptimizationInputs) -> dict[str, Any]:
         """Translate aggregated coordinator data into EMHASS runtimeparams."""
@@ -658,6 +749,7 @@ class EmhassClient:
         var_model: str,
         historic_days_to_retrieve: int = DEFAULT_ML_HISTORIC_DAYS,
         model_type: str = DEFAULT_ML_MODEL_TYPE,
+        optimization_time_step_minutes: int = DEFAULT_ML_BASE_STEP_MINUTES,
     ) -> dict[str, Any] | None:
         """Train EMHASS ML forecasting model for load history entity."""
         _LOGGER.debug(
@@ -675,14 +767,15 @@ class EmhassClient:
             "historic_days_to_retrieve": historic_days_to_retrieve,
             "model_type": model_type,
             "sklearn_model": DEFAULT_ML_SKLEARN_MODEL,
-            "num_lags": DEFAULT_ML_NUM_LAGS,
+            "num_lags": self._ml_num_lags_for_step(optimization_time_step_minutes),
             "split_date_delta": DEFAULT_ML_SPLIT_DATE_DELTA,
             "perform_backtest": False,
+            "optimization_time_step": optimization_time_step_minutes,
         }
         response = await self._async_post_action(
             "forecast-model-fit",
             payload,
-            timeout=120,
+            timeout=300,
         )
         if response is None:
             _LOGGER.debug("EMHASS forecast-model-fit failed: no response")
@@ -694,6 +787,46 @@ class EmhassClient:
         )
         return response
 
+    async def async_forecast_model_tune(
+        self,
+        *,
+        var_model: str,
+        model_type: str = DEFAULT_ML_MODEL_TYPE,
+        n_trials: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Tune an EMHASS ML forecasting model before fit."""
+        _LOGGER.debug(
+            "Starting EMHASS forecast-model-tune var_model=%s model_type=%s n_trials=%s",
+            var_model,
+            model_type,
+            n_trials,
+        )
+        if not await self._async_check_url(self._url, "EMHASS base"):
+            _LOGGER.debug("EMHASS forecast-model-tune aborted: base URL unreachable")
+            return None
+
+        payload: dict[str, Any] = {
+            "var_model": var_model,
+            "model_type": model_type,
+        }
+        if n_trials is not None and n_trials > 0:
+            payload["n_trials"] = n_trials
+
+        response = await self._async_post_action(
+            "forecast-model-tune",
+            payload,
+            timeout=300,
+        )
+        if response is None:
+            _LOGGER.debug("EMHASS forecast-model-tune failed: no response")
+            return None
+
+        _LOGGER.debug(
+            "EMHASS forecast-model-tune finished: response_keys=%s",
+            sorted(response.keys()),
+        )
+        return response
+
     async def async_forecast_model_predict(
         self,
         *,
@@ -701,6 +834,9 @@ class EmhassClient:
         prediction_horizon: int,
         optimization_time_step_minutes: int,
         model_type: str = DEFAULT_ML_MODEL_TYPE,
+        publish_entity_id: str = DEFAULT_ML_PREDICT_PUBLISH_ENTITY_ID,
+        publish_unit_of_measurement: str = DEFAULT_ML_PREDICT_PUBLISH_UNIT,
+        publish_friendly_name: str = DEFAULT_ML_PREDICT_PUBLISH_NAME,
     ) -> list[float] | None:
         """Predict load power forecast with EMHASS ML forecaster."""
         _LOGGER.debug(
@@ -719,6 +855,10 @@ class EmhassClient:
             "model_type": model_type,
             "prediction_horizon": prediction_horizon,
             "optimization_time_step": optimization_time_step_minutes,
+            "model_predict_publish": True,
+            "model_predict_entity_id": publish_entity_id,
+            "model_predict_unit_of_measurement": publish_unit_of_measurement,
+            "model_predict_friendly_name": publish_friendly_name,
         }
         response = await self._async_post_action(
             "forecast-model-predict",
@@ -729,11 +869,15 @@ class EmhassClient:
             _LOGGER.debug("EMHASS forecast-model-predict failed: no response")
             return None
 
-        values = self._extract_load_forecast_from_response(response, prediction_horizon)
+        values = await self._async_read_ml_predict_sensor(
+            entity_id=publish_entity_id,
+            expected_points=prediction_horizon,
+        )
         if not values:
             _LOGGER.debug(
-                "EMHASS forecast-model-predict returned no usable list: response_keys=%s",
+                "EMHASS forecast-model-predict did not publish usable sensor values: response_keys=%s entity_id=%s",
                 sorted(response.keys()),
+                publish_entity_id,
             )
             return None
 

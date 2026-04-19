@@ -36,6 +36,7 @@ class MLForecastService:
         """Initialize ML forecast service."""
         self.hass = hass
         self.coordinator = coordinator
+        self._last_ml_tune_utc: datetime | None = None
         self._last_ml_fit_utc: datetime | None = None
         _LOGGER.debug("MLForecastService initialized")
 
@@ -114,6 +115,7 @@ class MLForecastService:
         entity_id: str,
         *,
         force: bool = False,
+        optimization_time_step_minutes: int = _ML_SLOT_MINUTES,
     ) -> bool:
         """Train EMHASS ML model."""
         now = dt_util.utcnow()
@@ -129,8 +131,30 @@ class MLForecastService:
             )
             return True
 
+        if (
+            self._last_ml_tune_utc is None
+            or self._last_ml_tune_utc.date() != now.date()
+        ):
+            tune_response = await self.coordinator.emhass.async_forecast_model_tune(
+                var_model=entity_id,
+            )
+            if tune_response is None:
+                _LOGGER.debug(
+                    "ML tune failed for %s, continuing with fit",
+                    entity_id,
+                )
+            else:
+                self._last_ml_tune_utc = now
+                _LOGGER.debug(
+                    "ML tune finished for %s at %s response_keys=%s",
+                    entity_id,
+                    now.isoformat(),
+                    sorted(tune_response.keys()),
+                )
+
         fit_response = await self.coordinator.emhass.async_forecast_model_fit(
-            var_model=entity_id
+            var_model=entity_id,
+            optimization_time_step_minutes=optimization_time_step_minutes,
         )
         if fit_response is None:
             _LOGGER.debug("ML fit failed for %s", entity_id)
@@ -186,7 +210,15 @@ class MLForecastService:
             await self.coordinator.async_hourly_from_load_profile(buckets, profile)
             return
 
-        if not await self.async_train_model(entity_id):
+        prediction_horizon = len(buckets)
+        if prediction_horizon == 0:
+            return
+
+        step_minutes = self.coordinator.bucket_step_minutes(buckets)
+        if not await self.async_train_model(
+            entity_id,
+            optimization_time_step_minutes=step_minutes,
+        ):
             _LOGGER.debug(
                 "ML fit failed for %s, using profile fallback",
                 entity_id,
@@ -195,11 +227,6 @@ class MLForecastService:
             await self.coordinator.async_hourly_from_load_profile(buckets, profile)
             return
 
-        prediction_horizon = len(buckets)
-        if prediction_horizon == 0:
-            return
-
-        step_minutes = self.coordinator.bucket_step_minutes(buckets)
         ml_forecast_w = await self.async_predict_load(
             entity_id,
             prediction_horizon,

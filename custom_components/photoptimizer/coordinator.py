@@ -174,6 +174,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         self._last_execution_applied: bool | None = None
         self._last_deferrable_loads_applied: bool | None = None
         self._optimizer_enabled: bool = True
+        self._ml_pipeline_enabled: bool = False
         _LOGGER.debug(
             "Coordinator initialized for entry_id=%s emhass_url=%s token=%s",
             entry.entry_id,
@@ -189,6 +190,10 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
     async def async_set_optimizer_enabled(self, enabled: bool) -> None:
         """Enable/disable optimization runs."""
         self._optimizer_enabled = enabled
+
+    def enable_ml_pipeline(self) -> None:
+        """Enable ML fit/predict pipeline for subsequent cycles."""
+        self._ml_pipeline_enabled = True
 
     def _log_step_start(self, step: str, detail: str | None = None) -> None:
         """Log start of an orchestrated integration step."""
@@ -442,7 +447,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         await self._apply_current_solar_bias_correction(timeline)
 
         load_entity = self.entry.data.get(CONF_CURRENT_CONSUMPTION_ENTITY)
-        if load_entity:
+        if load_entity and self._ml_pipeline_enabled:
             _LOGGER.debug(
                 "Using load entity for ML forecast: %s",
                 load_entity,
@@ -450,6 +455,13 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
             await self.ml_forecast.async_populate_load_from_ml_or_profile(
                 load_entity, timeline
             )
+        elif load_entity:
+            _LOGGER.debug(
+                "ML pipeline disabled during setup; using profile fallback for %s",
+                load_entity,
+            )
+            load_profile = await self._build_load_profile(load_entity)
+            await self._hourly_from_load_profile(timeline, load_profile)
         else:
             _LOGGER.debug("No load entity configured, using default profile")
             load_profile = await self._build_load_profile(None)
@@ -869,17 +881,6 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                 return
             try:
                 async with asyncio.timeout(90):
-                    load_entity = self.entry.data.get(CONF_CURRENT_CONSUMPTION_ENTITY)
-                    if (
-                        load_entity
-                        and await self.ml_forecast.async_has_sufficient_history(
-                            load_entity
-                        )
-                    ):
-                        await self.ml_forecast.async_train_model(
-                            load_entity,
-                            force=True,
-                        )
                     optimization_inputs, raw_pv = await self._async_collect_inputs()
                     optimization_result = (
                         await self.emhass.async_run_naive_optimization(

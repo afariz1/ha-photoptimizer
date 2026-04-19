@@ -10,11 +10,11 @@ from homeassistant.core import HomeAssistant
 from .const import (
     CONF_BATTERY_CHARGE_POWER_MAX,
     CONF_BATTERY_DISCHARGE_POWER_MAX,
-    CONF_CONNECT_INVERTER_ENTITIES,
     CONF_GROWATT_AC_CHARGE_SWITCH_ENTITY,
     CONF_GROWATT_DEVICE_ID,
     CONF_GROWATT_INVERTER_VARIANT,
     CONF_INVERTER_CHARGE_POWER_ENTITY,
+    CONF_INVERTER_COMMAND_ONLY,
     CONF_INVERTER_DISCHARGE_POWER_ENTITY,
     CONF_INVERTER_MODE_ENTITY,
     CONF_INVERTER_TYPE,
@@ -37,12 +37,10 @@ class NoopControlAdapter(InverterControlAdapter):
 
     async def async_apply(self, command: ExecutionSlotCommand) -> None:
         """Log command without applying any control."""
-        _LOGGER.info(
-            "Command-only inverter action: mode=%s power_w=%s soc_target=%s grid_limit=%s",
+        _LOGGER.debug(
+            "Noop control adapter: ignoring command mode=%s power=%s",
             command.op_mode.value,
             command.p_bat_cmd,
-            command.soc_target,
-            command.grid_limit,
         )
 
 
@@ -61,16 +59,15 @@ def create_inverter_adapter(
         if the type is unsupported.
     """
     inverter_type = entry.data.get(CONF_INVERTER_TYPE)
-    if not entry.data.get(CONF_CONNECT_INVERTER_ENTITIES, True):
-        _LOGGER.info(
-            "Inverter entity connection disabled; running in command-only mode for type '%s'",
-            inverter_type,
-        )
-        return NoopControlAdapter()
-
     mode_entity = entry.data.get(CONF_INVERTER_MODE_ENTITY)
     charge_entity = entry.data.get(CONF_INVERTER_CHARGE_POWER_ENTITY)
     discharge_entity = entry.data.get(CONF_INVERTER_DISCHARGE_POWER_ENTITY)
+    if entry.data.get(CONF_INVERTER_COMMAND_ONLY, False):
+        _LOGGER.debug(
+            "Inverter control disabled by configuration; using noop command logger"
+        )
+        return NoopControlAdapter()
+
     max_charge_w = float(
         entry.data.get(
             CONF_BATTERY_CHARGE_POWER_MAX,

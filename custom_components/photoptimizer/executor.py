@@ -9,6 +9,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
+from .const import CONF_COMMAND_LOG_ONLY
 from .inverter_factory import create_inverter_adapter
 from .models import (
     DeferrableLoadDefinition,
@@ -30,6 +31,7 @@ class PhotoptimizerExecutor:
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         """Initialize executor for one config entry."""
         self._hass = hass
+        self._command_log_only = bool(entry.data.get(CONF_COMMAND_LOG_ONLY, False))
         self._last_signature: tuple[datetime, int, str] | None = None
         self._last_deferrable_signatures: dict[str, bool] = {}
         self._controller = create_inverter_adapter(hass, entry)
@@ -122,6 +124,17 @@ class PhotoptimizerExecutor:
                 continue
 
             service_name = "turn_on" if desired_on else "turn_off"
+            if self._command_log_only:
+                _LOGGER.info(
+                    "Print-only mode: would %s deferrable load %s via %s",
+                    service_name,
+                    load.name,
+                    load.entity_id,
+                )
+                self._last_deferrable_signatures[load.entity_id] = desired_on
+                applied = True
+                continue
+
             await self._hass.services.async_call(
                 "switch",
                 service_name,

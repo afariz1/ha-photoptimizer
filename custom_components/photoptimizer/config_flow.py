@@ -20,6 +20,7 @@ from .const import (
     CONF_BATTERY_SOC_ENTITY,
     CONF_BATTERY_SOC_RESERVE_PERCENT,
     CONF_BATTERY_TARGET_SOC_PERCENT,
+    CONF_COMMAND_LOG_ONLY,
     CONF_CURRENT_CONSUMPTION_ENTITY,
     CONF_CURRENT_SOLAR_PRODUCTION_ENTITY,
     CONF_DECLINATION,
@@ -267,10 +268,19 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "Inverter step received input: %s",
                 _redact_user_input(user_input),
             )
-            self._data.update(user_input)
-            _LOGGER.debug("Inverter data step completed")
 
-            return await self.async_step_deferrable_load_count()
+            if not bool(user_input.get(CONF_COMMAND_LOG_ONLY)) and (
+                not user_input.get(CONF_INVERTER_MODE_ENTITY)
+                or not user_input.get(CONF_INVERTER_DISCHARGE_POWER_ENTITY)
+            ):
+                errors["base"] = "inverter_entities_required"
+                _LOGGER.debug(
+                    "Inverter entities missing while print-only mode is disabled"
+                )
+            else:
+                self._data.update(user_input)
+                _LOGGER.debug("Inverter data step completed")
+                return await self.async_step_deferrable_load_count()
 
         _LOGGER.debug("Showing inverter form")
 
@@ -322,36 +332,28 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             vol.Optional(CONF_EMHASS_TOKEN): selector.TextSelector(
                 selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
             ),
+            vol.Required(CONF_COMMAND_LOG_ONLY, default=False): bool,
+            vol.Optional(CONF_INVERTER_MODE_ENTITY): selector.EntitySelector(
+                selector.EntitySelectorConfig(
+                    domain=["select"],
+                    multiple=False,
+                )
+            ),
+            vol.Optional(CONF_INVERTER_CHARGE_POWER_ENTITY): selector.EntitySelector(
+                selector.EntitySelectorConfig(
+                    domain=["number"],
+                    multiple=False,
+                )
+            ),
+            vol.Optional(CONF_INVERTER_DISCHARGE_POWER_ENTITY): selector.EntitySelector(
+                selector.EntitySelectorConfig(
+                    domain=["number"],
+                    multiple=False,
+                )
+            ),
         }
 
         inverter_type = self._data.get(CONF_INVERTER_TYPE)
-        data_fields.update(
-            {
-                vol.Required(CONF_INVERTER_MODE_ENTITY): selector.EntitySelector(
-                    selector.EntitySelectorConfig(
-                        domain=["select"],
-                        multiple=False,
-                    )
-                ),
-                vol.Optional(
-                    CONF_INVERTER_CHARGE_POWER_ENTITY
-                ): selector.EntitySelector(
-                    selector.EntitySelectorConfig(
-                        domain=["number"],
-                        multiple=False,
-                    )
-                ),
-                vol.Required(
-                    CONF_INVERTER_DISCHARGE_POWER_ENTITY
-                ): selector.EntitySelector(
-                    selector.EntitySelectorConfig(
-                        domain=["number"],
-                        multiple=False,
-                    )
-                ),
-            }
-        )
-
         if inverter_type == INVERTER_TYPE_GROWATT:
             data_fields.update(
                 {

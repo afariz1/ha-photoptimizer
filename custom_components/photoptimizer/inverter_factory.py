@@ -10,6 +10,7 @@ from homeassistant.core import HomeAssistant
 from .const import (
     CONF_BATTERY_CHARGE_POWER_MAX,
     CONF_BATTERY_DISCHARGE_POWER_MAX,
+    CONF_COMMAND_LOG_ONLY,
     CONF_GROWATT_AC_CHARGE_SWITCH_ENTITY,
     CONF_GROWATT_DEVICE_ID,
     CONF_GROWATT_INVERTER_VARIANT,
@@ -36,10 +37,13 @@ class NoopControlAdapter(InverterControlAdapter):
 
     async def async_apply(self, command: ExecutionSlotCommand) -> None:
         """Log command without applying any control."""
-        _LOGGER.debug(
-            "Noop control adapter: ignoring command mode=%s power=%s",
+        _LOGGER.info(
+            "Print-only mode: would apply inverter command mode=%s power_w=%s soc_target=%s grid_limit=%s slot_start=%s",
             command.op_mode.value,
             command.p_bat_cmd,
+            command.soc_target,
+            command.grid_limit,
+            command.slot_start.isoformat() if command.slot_start else "unknown",
         )
 
 
@@ -58,6 +62,10 @@ def create_inverter_adapter(
         if the type is unsupported.
     """
     inverter_type = entry.data.get(CONF_INVERTER_TYPE)
+    if bool(entry.data.get(CONF_COMMAND_LOG_ONLY, False)):
+        _LOGGER.info("Print-only mode enabled; inverter commands will only be logged")
+        return NoopControlAdapter()
+
     mode_entity = entry.data.get(CONF_INVERTER_MODE_ENTITY)
     charge_entity = entry.data.get(CONF_INVERTER_CHARGE_POWER_ENTITY)
     discharge_entity = entry.data.get(CONF_INVERTER_DISCHARGE_POWER_ENTITY)

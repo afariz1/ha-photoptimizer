@@ -38,6 +38,7 @@ CONF_INVERTER_DISCHARGE_POWER_ENTITY = "inverter_discharge_power_entity"
 CONF_GROWATT_AC_CHARGE_SWITCH_ENTITY = "growatt_ac_charge_switch_entity"
 CONF_GROWATT_DEVICE_ID = "growatt_device_id"
 CONF_GROWATT_INVERTER_VARIANT = "growatt_inverter_variant"
+CONF_COMMAND_LOG_ONLY = "command_log_only"
 
 INVERTER_TYPE_GOODWE = "goodwe"
 INVERTER_TYPE_GROWATT = "growatt"

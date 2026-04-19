@@ -6,6 +6,7 @@
   "config_flow": true,
   "dependencies": ["recorder"],
   "documentation": "https://github.com/opela/ha-photoptimizer#readme",
+  "issue_tracker": "https://github.com/opela/ha-photoptimizer/issues",
   "integration_type": "service",
   "iot_class": "local_polling",
   "quality_scale": "bronze",

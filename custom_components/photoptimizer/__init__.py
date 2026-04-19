@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
 import logging
 
 from forecast_solar import ForecastSolar, ForecastSolarError
@@ -12,7 +11,7 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from .const import DOMAIN
@@ -21,8 +20,7 @@ from .coordinator import PhotoptimizerCoordinator
 _LOGGER = logging.getLogger(__name__)
 
 _PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SWITCH]
-_MPC_INTERVAL = timedelta(minutes=5)
-_ML_TUNE_INTERVAL = timedelta(hours=24)
+_MPC_QUARTER_MINUTES = [0, 15, 30, 45]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -103,6 +101,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def _async_handle_mpc_cycle() -> None:
         """Run one full MPC cycle in strict order: optimize, then publish."""
         _LOGGER.debug("Scheduled MPC cycle triggered")
+        if not coordinator.ml_bootstrap_completed:
+            _LOGGER.debug("Skipping MPC cycle until startup ML bootstrap is finished")
+            return
         if not coordinator.optimizer_enabled:
             _LOGGER.debug("Optimization disabled via switch; skipping MPC cycle")
             return
@@ -121,48 +122,52 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except UpdateFailed as err:
             _LOGGER.warning("EMHASS MPC publish-data failed: %s", err)
 
-    async def _async_handle_ml_daily_tune() -> None:
-        """Run one background ML tune cycle."""
-        _LOGGER.debug("Scheduled ML daily tune triggered")
+    async def _async_handle_ml_daily_refresh() -> None:
+        """Run one background ML daily refresh cycle."""
+        _LOGGER.debug("Scheduled ML daily refresh triggered")
         try:
-            await coordinator.async_run_ml_daily_tune()
-            _LOGGER.debug("Scheduled ML daily tune finished")
+            await coordinator.async_run_ml_daily_refresh()
+            _LOGGER.debug("Scheduled ML daily refresh finished")
         except UpdateFailed as err:
-            _LOGGER.warning("EMHASS ML daily tune failed: %s", err)
+            _LOGGER.warning("EMHASS ML daily refresh failed: %s", err)
 
     async def _async_handle_startup() -> None:
-        """Run startup sequence: optimize, publish."""
+        """Run startup sequence: ML bootstrap only."""
         _LOGGER.debug("Startup started")
-        coordinator.enable_ml_pipeline()
-        await _async_handle_mpc_cycle()
-        hass.async_create_task(_async_handle_ml_daily_tune())
-        _LOGGER.debug("Startup bootstrap cycle finished")
+        try:
+            await coordinator.async_run_startup_ml_bootstrap()
+        except Exception as err:
+            _LOGGER.warning("Startup ML bootstrap failed: %s", err)
+        _LOGGER.debug("Startup ML bootstrap finished")
 
     @callback
     def _mpc_schedule_listener(_: object) -> None:
-        """Schedule one MPC cycle every configured interval."""
+        """Schedule one MPC cycle at quarter-hour boundaries."""
         _LOGGER.debug("MPC schedule fired")
         hass.async_create_task(_async_handle_mpc_cycle())
 
     entry.async_on_unload(
-        async_track_time_interval(
+        async_track_time_change(
             hass,
             _mpc_schedule_listener,
-            _MPC_INTERVAL,
+            minute=_MPC_QUARTER_MINUTES,
+            second=0,
         )
     )
 
     @callback
-    def _ml_tune_schedule_listener(_: object) -> None:
-        """Schedule one ML tune cycle every configured interval."""
-        _LOGGER.debug("ML tune schedule fired")
-        hass.async_create_task(_async_handle_ml_daily_tune())
+    def _ml_daily_schedule_listener(_: object) -> None:
+        """Schedule one ML daily refresh at local 00:05."""
+        _LOGGER.debug("ML daily refresh schedule fired")
+        hass.async_create_task(_async_handle_ml_daily_refresh())
 
     entry.async_on_unload(
-        async_track_time_interval(
+        async_track_time_change(
             hass,
-            _ml_tune_schedule_listener,
-            _ML_TUNE_INTERVAL,
+            _ml_daily_schedule_listener,
+            hour=0,
+            minute=5,
+            second=0,
         )
     )
 

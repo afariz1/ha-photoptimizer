@@ -43,7 +43,7 @@ from .const import (
     DEFAULT_HORIZON_HOURS,
     DEFAULT_WEAR_COST_PER_KWH,
 )
-from .emhass_client import EmhassClient
+from .emhass_client import DEFAULT_ML_PREDICT_PUBLISH_ENTITY_ID, EmhassClient
 from .executor import PhotoptimizerExecutor
 from .mlforecast import MLForecastService
 from .models import (
@@ -60,6 +60,7 @@ _PV_BIAS_MAX_FACTOR = 1.4
 _PV_BIAS_MIN_FORECAST_W = 50.0
 _PV_BIAS_APPLY_BUCKETS = 4
 _OPTIMIZATION_TIME_STEP_MINUTES = 15
+_ML_BOOTSTRAP_TIMEOUT_SECONDS = 300
 
 
 class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
@@ -86,7 +87,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                         operating_minutes=int(raw_load["operating_minutes"]),
                     )
                 )
-            except KeyError, TypeError, ValueError:
+            except (KeyError, TypeError, ValueError):
                 _LOGGER.debug(
                     "Skipping invalid deferrable load definition: %s", raw_load
                 )
@@ -176,7 +177,8 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         self._last_execution_applied: bool | None = None
         self._last_deferrable_loads_applied: bool | None = None
         self._optimizer_enabled: bool = True
-        self._ml_pipeline_enabled: bool = False
+        self._ml_bootstrap_completed: bool = False
+        self._ml_fit_completed: bool = False
         _LOGGER.debug(
             "Coordinator initialized for entry_id=%s emhass_url=%s token=%s",
             entry.entry_id,
@@ -193,9 +195,10 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         """Enable/disable optimization runs."""
         self._optimizer_enabled = enabled
 
-    def enable_ml_pipeline(self) -> None:
-        """Enable ML fit/predict pipeline for subsequent cycles."""
-        self._ml_pipeline_enabled = True
+    @property
+    def ml_bootstrap_completed(self) -> bool:
+        """Return whether startup ML bootstrap reached completion state."""
+        return self._ml_bootstrap_completed
 
     def _log_step_start(self, step: str, detail: str | None = None) -> None:
         """Log start of an orchestrated integration step."""
@@ -246,60 +249,127 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         """Build a 24-hour load profile from state history or return defaults."""
         return await self._build_load_profile(entity_id)
 
-    async def async_run_startup_bootstrap(self) -> None:
-        """Run one full MPC cycle during startup."""
-        if not self._optimizer_enabled:
-            self._log_step_ok("startup_bootstrap", "optimizer disabled, skipping")
-            return
-
-        self._log_step_start("startup_bootstrap")
-
-        try:
-            await self.async_run_mpc_optimization()
-        except UpdateFailed as err:
-            self._log_step_error("startup_mpc_optimization", err)
-            return
-
-        try:
-            await self.async_run_mpc_publish()
-        except UpdateFailed as err:
-            self._log_step_error("startup_mpc_publish", err)
-            return
-
-        self._log_step_ok("startup_bootstrap")
-
-    async def async_run_ml_daily_tune(self) -> None:
-        """Run ML model tune in a separate daily workflow."""
-        if not self._ml_pipeline_enabled:
-            self._log_step_ok("ml_daily_tune", "ml pipeline disabled, skipped")
-            return
-
+    async def async_run_startup_ml_bootstrap(self) -> None:
+        """Run startup ML bootstrap with a hard timeout budget."""
         load_entity = self.entry.data.get(CONF_CURRENT_CONSUMPTION_ENTITY)
+        self._ml_bootstrap_completed = False
+        self._ml_fit_completed = False
+
         if not load_entity:
-            self._log_step_ok("ml_daily_tune", "no load entity configured, skipped")
+            self._ml_bootstrap_completed = True
+            self._log_step_ok("startup_ml_bootstrap", "no load entity configured")
             return
 
         if not await self.ml_forecast.async_has_sufficient_history(load_entity):
-            self._log_step_ok("ml_daily_tune", "insufficient history, skipped")
+            self._ml_bootstrap_completed = True
+            self._log_step_ok("startup_ml_bootstrap", "insufficient history")
             return
 
         if self._operation_lock.locked():
-            self._log_step_ok("ml_daily_tune", "mpc operation in progress, skipped")
+            self._ml_bootstrap_completed = True
+            self._log_step_ok("startup_ml_bootstrap", "mpc operation in progress")
             return
 
         try:
             await asyncio.wait_for(self._operation_lock.acquire(), timeout=0.05)
         except TimeoutError:
-            self._log_step_ok("ml_daily_tune", "mpc operation in progress, skipped")
+            self._ml_bootstrap_completed = True
+            self._log_step_ok("startup_ml_bootstrap", "mpc operation in progress")
             return
 
         try:
-            self._log_step_start("ml_daily_tune", load_entity)
-            tuned = await self.ml_forecast.async_tune_model_once_daily(load_entity)
-            if not tuned:
-                self._raise_update_failed("EMHASS ML daily tune failed")
+            self._log_step_start("startup_ml_bootstrap", load_entity)
+            try:
+                async with asyncio.timeout(_ML_BOOTSTRAP_TIMEOUT_SECONDS):
+                    fitted = await self.ml_forecast.async_train_model(
+                        load_entity,
+                        force=True,
+                        optimization_time_step_minutes=_OPTIMIZATION_TIME_STEP_MINUTES,
+                    )
+                    if not fitted:
+                        self._log_step_ok("startup_ml_bootstrap", "fit failed")
+                        return
 
-            self._log_step_ok("ml_daily_tune", load_entity)
+                    self._ml_fit_completed = True
+                    prediction_horizon = (
+                        DEFAULT_HORIZON_HOURS * 60
+                    ) // _OPTIMIZATION_TIME_STEP_MINUTES
+                    predicted = await self.ml_forecast.async_predict_load(
+                        load_entity,
+                        prediction_horizon,
+                        _OPTIMIZATION_TIME_STEP_MINUTES,
+                    )
+                    if predicted is None:
+                        self._log_step_ok("startup_ml_bootstrap", "predict failed")
+                        return
+
+                    self._log_step_ok(
+                        "startup_ml_bootstrap",
+                        f"fit+predict finished points={len(predicted)}",
+                    )
+            except TimeoutError:
+                self._log_step_ok(
+                    "startup_ml_bootstrap",
+                    f"timeout after {_ML_BOOTSTRAP_TIMEOUT_SECONDS}s",
+                )
+            except Exception as err:
+                self._log_step_error("startup_ml_bootstrap", err)
+        finally:
+            self._ml_bootstrap_completed = True
+            self._operation_lock.release()
+
+    async def async_run_ml_daily_refresh(self) -> None:
+        """Run daily ML refresh at midnight: tune+predict or fit+predict."""
+        load_entity = self.entry.data.get(CONF_CURRENT_CONSUMPTION_ENTITY)
+        if not load_entity:
+            self._log_step_ok("ml_daily_refresh", "no load entity configured")
+            return
+
+        if not await self.ml_forecast.async_has_sufficient_history(load_entity):
+            self._log_step_ok("ml_daily_refresh", "insufficient history")
+            return
+
+        if self._operation_lock.locked():
+            self._log_step_ok("ml_daily_refresh", "mpc operation in progress")
+            return
+
+        try:
+            await asyncio.wait_for(self._operation_lock.acquire(), timeout=0.05)
+        except TimeoutError:
+            self._log_step_ok("ml_daily_refresh", "mpc operation in progress")
+            return
+
+        try:
+            self._log_step_start("ml_daily_refresh", load_entity)
+            if self._ml_fit_completed:
+                tuned = await self.ml_forecast.async_tune_model_once_daily(load_entity)
+                if not tuned:
+                    self._raise_update_failed("EMHASS ML daily tune failed")
+            else:
+                fitted = await self.ml_forecast.async_train_model(
+                    load_entity,
+                    force=True,
+                    optimization_time_step_minutes=_OPTIMIZATION_TIME_STEP_MINUTES,
+                )
+                if not fitted:
+                    self._raise_update_failed("EMHASS ML daily fit failed")
+                self._ml_fit_completed = True
+
+            prediction_horizon = (
+                DEFAULT_HORIZON_HOURS * 60
+            ) // _OPTIMIZATION_TIME_STEP_MINUTES
+            predicted = await self.ml_forecast.async_predict_load(
+                load_entity,
+                prediction_horizon,
+                _OPTIMIZATION_TIME_STEP_MINUTES,
+            )
+            if predicted is None:
+                self._raise_update_failed("EMHASS ML daily predict failed")
+
+            self._log_step_ok(
+                "ml_daily_refresh",
+                f"refresh finished points={len(predicted)}",
+            )
         finally:
             self._operation_lock.release()
 
@@ -484,21 +554,17 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         await self._apply_current_solar_bias_correction(timeline)
 
         load_entity = self.entry.data.get(CONF_CURRENT_CONSUMPTION_ENTITY)
-        if load_entity and self._ml_pipeline_enabled:
+        if load_entity:
             _LOGGER.debug(
-                "Using load entity for ML forecast: %s",
-                load_entity,
+                "Loading consumption forecast from published ML entity with profile fallback"
             )
-            await self.ml_forecast.async_populate_load_from_ml_or_profile(
-                load_entity, timeline
+            loaded_from_ml_entity = await self._async_hourly_from_published_ml_forecast(
+                DEFAULT_ML_PREDICT_PUBLISH_ENTITY_ID,
+                timeline,
             )
-        elif load_entity:
-            _LOGGER.debug(
-                "ML pipeline disabled during setup; using profile fallback for %s",
-                load_entity,
-            )
-            load_profile = await self._build_load_profile(load_entity)
-            await self._hourly_from_load_profile(timeline, load_profile)
+            if not loaded_from_ml_entity:
+                load_profile = await self._build_load_profile(load_entity)
+                await self._hourly_from_load_profile(timeline, load_profile)
         else:
             _LOGGER.debug("No load entity configured, using default profile")
             load_profile = await self._build_load_profile(None)
@@ -710,6 +776,73 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
             "Load timeline populated from profile with %s hourly values",
             len(profile),
         )
+
+    async def _async_hourly_from_published_ml_forecast(
+        self,
+        entity_id: str,
+        buckets: list[OptimizationBucket],
+    ) -> bool:
+        """Fill load buckets from an already published ML forecast sensor."""
+        if not buckets:
+            return True
+
+        state = await self._async_get_state_with_startup_wait(entity_id)
+        if state is None:
+            return False
+
+        forecasts = state.attributes.get("forecasts")
+        if not isinstance(forecasts, list):
+            return False
+
+        first_bucket_utc = dt_util.as_utc(buckets[0].start).replace(
+            second=0, microsecond=0
+        )
+        values_by_slot_utc: dict[datetime, float] = {}
+        for row in forecasts:
+            if not isinstance(row, dict):
+                continue
+
+            parsed = dt_util.parse_datetime(str(row.get("date")))
+            if parsed is None:
+                continue
+
+            slot_utc = dt_util.as_utc(parsed).replace(second=0, microsecond=0)
+            if slot_utc < first_bucket_utc:
+                continue
+
+            numeric: float | None = None
+            for key in ("p_load_forecast", "value", "state"):
+                numeric = self._coerce_float(row.get(key))
+                if numeric is not None:
+                    break
+
+            if numeric is None:
+                for row_key, row_value in row.items():
+                    if row_key == "date":
+                        continue
+                    numeric = self._coerce_float(row_value)
+                    if numeric is not None:
+                        break
+
+            if numeric is not None:
+                values_by_slot_utc[slot_utc] = numeric
+
+        bucket_hours = self._bucket_hours(buckets)
+        for bucket in buckets:
+            bucket_slot_utc = dt_util.as_utc(bucket.start).replace(
+                second=0, microsecond=0
+            )
+            bucket_value_w = values_by_slot_utc.get(bucket_slot_utc)
+            if bucket_value_w is None:
+                return False
+            bucket.load = (bucket_value_w * bucket_hours) / 1000.0
+
+        _LOGGER.debug(
+            "Load timeline populated from published ML entity %s: points=%s",
+            entity_id,
+            len(buckets),
+        )
+        return True
 
     async def _build_load_profile_from_state_history(
         self,

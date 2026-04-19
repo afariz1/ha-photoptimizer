@@ -26,18 +26,11 @@ async def async_setup_entry(
     coordinator: PhotoptimizerCoordinator = hass.data[DOMAIN][entry.entry_id]
     _LOGGER.debug("Setting up switch platform for entry_id=%s", entry.entry_id)
 
-    async_add_entities(
-        [
-            PhotoptimizerOptimizerSwitch(coordinator, entry),
-            PhotoptimizerMlForecastSwitch(coordinator, entry),
-        ]
-    )
+    async_add_entities([PhotoptimizerSwitch(coordinator, entry)])
 
 
-class PhotoptimizerOptimizerSwitch(
-    CoordinatorEntity[PhotoptimizerCoordinator], SwitchEntity
-):
-    """Representation of the optimizer enable switch."""
+class PhotoptimizerSwitch(CoordinatorEntity[PhotoptimizerCoordinator], SwitchEntity):
+    """Representation of a Photoptimizer switch."""
 
     _attr_has_entity_name = True
     _attr_name = "Optimizer enabled"
@@ -74,46 +67,3 @@ class PhotoptimizerOptimizerSwitch(
         self._attr_is_on = False
         self.async_write_ha_state()
         _LOGGER.debug("Optimizer switch turned off")
-
-
-class PhotoptimizerMlForecastSwitch(
-    CoordinatorEntity[PhotoptimizerCoordinator], SwitchEntity
-):
-    """Representation of the ML forecaster enable switch."""
-
-    _attr_has_entity_name = True
-    _attr_name = "ML forecaster enabled"
-
-    def __init__(
-        self,
-        coordinator: PhotoptimizerCoordinator,
-        entry: ConfigEntry,
-    ) -> None:
-        """Initialize the switch."""
-        super().__init__(coordinator)
-        self._attr_unique_id = f"{entry.entry_id}_ml_forecast_enabled"
-        self._attr_is_on = coordinator.ml_forecast_enabled
-        _LOGGER.debug("Created switch entity unique_id=%s", self._attr_unique_id)
-
-    @property
-    def icon(self) -> str:
-        """Icon of the entity based on state."""
-        if self.is_on:
-            return "mdi:robot"
-        return "mdi:robot-off"
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        """Turn the entity on."""
-        await self.coordinator.async_set_ml_forecast_enabled(True)
-        self._attr_is_on = True
-        self.async_write_ha_state()
-        _LOGGER.debug("ML forecaster switch turned on")
-        self.hass.async_create_task(self.coordinator.async_request_refresh())
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        """Turn the entity off."""
-        await self.coordinator.async_set_ml_forecast_enabled(False)
-        self._attr_is_on = False
-        self.async_write_ha_state()
-        _LOGGER.debug("ML forecaster switch turned off")
-        self.hass.async_create_task(self.coordinator.async_request_refresh())

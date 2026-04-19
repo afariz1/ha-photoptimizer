@@ -32,7 +32,7 @@ DEFAULT_BATTERY_MAXIMUM_STATE_OF_CHARGE = 0.9
 DEFAULT_ML_HISTORIC_DAYS = 9
 DEFAULT_ML_MODEL_TYPE = "photoptimizer_load"
 DEFAULT_ML_SKLEARN_MODEL = "RandomForestRegressor"
-DEFAULT_ML_TIME_STEP_MINUTES = 15
+DEFAULT_ML_NUM_LAGS = 48
 DEFAULT_ML_SPLIT_DATE_DELTA = "48h"
 _SLOT_POWER_THRESHOLD_W = 50.0
 
@@ -257,12 +257,11 @@ class EmhassClient:
                         _LOGGER.error("EMHASS error %s: %s", response.status, text)
                         return None
                     _LOGGER.warning(
-                        "EMHASS %s returned %s: %s",
+                        "EMHASS %s returned %s (treating as partial success): %s",
                         action,
                         response.status,
                         text,
                     )
-                    return None
 
                 content_type = response.headers.get("Content-Type", "")
                 if "application/json" in content_type:
@@ -402,14 +401,6 @@ class EmhassClient:
             sorted(payload.keys()),
         )
         return payload
-
-    def _default_num_lags(self, optimization_time_step_minutes: int) -> int:
-        """Return one-day lag count based on optimization timestep.
-
-        EMHASS ML docs recommend using approximately one day of lag features.
-        """
-        step = max(1, int(optimization_time_step_minutes))
-        return max(1, int(round((24 * 60) / step)))
 
     def _read_published_entities(self) -> dict[str, PublishedEntityState]:
         """Read EMHASS-published entities from the local HA state machine."""
@@ -667,17 +658,13 @@ class EmhassClient:
         var_model: str,
         historic_days_to_retrieve: int = DEFAULT_ML_HISTORIC_DAYS,
         model_type: str = DEFAULT_ML_MODEL_TYPE,
-        optimization_time_step_minutes: int = DEFAULT_ML_TIME_STEP_MINUTES,
     ) -> dict[str, Any] | None:
         """Train EMHASS ML forecasting model for load history entity."""
-        num_lags = self._default_num_lags(optimization_time_step_minutes)
         _LOGGER.debug(
-            "Starting EMHASS forecast-model-fit var_model=%s historic_days=%s model_type=%s step=%s num_lags=%s",
+            "Starting EMHASS forecast-model-fit var_model=%s historic_days=%s model_type=%s",
             var_model,
             historic_days_to_retrieve,
             model_type,
-            optimization_time_step_minutes,
-            num_lags,
         )
         if not await self._async_check_url(self._url, "EMHASS base"):
             _LOGGER.debug("EMHASS forecast-model-fit aborted: base URL unreachable")
@@ -688,7 +675,7 @@ class EmhassClient:
             "historic_days_to_retrieve": historic_days_to_retrieve,
             "model_type": model_type,
             "sklearn_model": DEFAULT_ML_SKLEARN_MODEL,
-            "num_lags": num_lags,
+            "num_lags": DEFAULT_ML_NUM_LAGS,
             "split_date_delta": DEFAULT_ML_SPLIT_DATE_DELTA,
             "perform_backtest": False,
         }

@@ -5,7 +5,6 @@ This module contains load power prediction logic using EMHASS ML forecaster.
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timedelta
 from functools import partial
 import logging
@@ -25,11 +24,7 @@ _LOGGER = logging.getLogger(__name__)
 
 _MIN_HISTORY_ROWS_FOR_ML = 288
 _HISTORY_WINDOW_DAYS_FOR_ML = 7
-_HISTORY_SUFFICIENCY_CACHE_MINUTES = 120
 _ML_SLOT_MINUTES = 15
-_ML_FIT_TIMEOUT_SECONDS = 160
-_ML_PREDICT_TIMEOUT_SECONDS = 90
-_MAX_ML_TRAIN_FAILURES = 3
 
 
 class MLForecastService:
@@ -42,35 +37,7 @@ class MLForecastService:
         self.hass = hass
         self.coordinator = coordinator
         self._last_ml_fit_utc: datetime | None = None
-        self._consecutive_ml_failures = 0
-        self._ml_fallback_locked = False
-        self._history_sufficiency_cache: dict[str, tuple[datetime, bool]] = {}
         _LOGGER.debug("MLForecastService initialized")
-
-    def _register_ml_failure(self, entity_id: str, stage: str) -> None:
-        """Track consecutive ML failures and lock fallback after threshold."""
-        self._consecutive_ml_failures += 1
-        if self._consecutive_ml_failures >= _MAX_ML_TRAIN_FAILURES:
-            self._ml_fallback_locked = True
-            _LOGGER.warning(
-                "ML %s failed %s times for %s; locking to fallback profile mode",
-                stage,
-                self._consecutive_ml_failures,
-                entity_id,
-            )
-            return
-
-        _LOGGER.warning(
-            "ML %s failed for %s (%s/%s), using fallback profile",
-            stage,
-            entity_id,
-            self._consecutive_ml_failures,
-            _MAX_ML_TRAIN_FAILURES,
-        )
-
-    def _register_ml_success(self) -> None:
-        """Reset consecutive ML failures after any successful ML operation."""
-        self._consecutive_ml_failures = 0
 
     def _coerce_float(self, value: object) -> float | None:
         """Convert arbitrary value to float when possible."""
@@ -130,25 +97,9 @@ class MLForecastService:
 
     async def async_has_sufficient_history(self, entity_id: str) -> bool:
         """Check if entity has enough historical data for ML model training."""
-        if self._ml_fallback_locked:
-            return False
-
-        now = dt_util.utcnow()
-        cached = self._history_sufficiency_cache.get(entity_id)
-        if cached is not None:
-            checked_at, value = cached
-            if now - checked_at < timedelta(minutes=_HISTORY_SUFFICIENCY_CACHE_MINUTES):
-                _LOGGER.debug(
-                    "Using cached ML history sufficiency for %s: %s",
-                    entity_id,
-                    value,
-                )
-                return value
-
         start = dt_util.utcnow() - timedelta(days=_HISTORY_WINDOW_DAYS_FOR_ML)
         valid_rows = await self._count_valid_state_history_slots(entity_id, start)
         is_sufficient = valid_rows >= _MIN_HISTORY_ROWS_FOR_ML
-        self._history_sufficiency_cache[entity_id] = (now, is_sufficient)
         _LOGGER.debug(
             "ML history sufficiency for %s (state history): valid_rows=%s threshold=%s sufficient=%s",
             entity_id,
@@ -165,13 +116,6 @@ class MLForecastService:
         force: bool = False,
     ) -> bool:
         """Train EMHASS ML model."""
-        if self._ml_fallback_locked:
-            _LOGGER.debug(
-                "ML fit disabled after %s consecutive failures; using fallback profile",
-                _MAX_ML_TRAIN_FAILURES,
-            )
-            return False
-
         now = dt_util.utcnow()
         if (
             not force
@@ -185,26 +129,14 @@ class MLForecastService:
             )
             return True
 
-        try:
-            async with asyncio.timeout(_ML_FIT_TIMEOUT_SECONDS):
-                fit_response = await self.coordinator.emhass.async_forecast_model_fit(
-                    var_model=entity_id,
-                    optimization_time_step_minutes=_ML_SLOT_MINUTES,
-                )
-        except TimeoutError:
-            _LOGGER.warning(
-                "ML fit timed out for %s after %ss",
-                entity_id,
-                _ML_FIT_TIMEOUT_SECONDS,
-            )
-            fit_response = None
-
+        fit_response = await self.coordinator.emhass.async_forecast_model_fit(
+            var_model=entity_id
+        )
         if fit_response is None:
-            self._register_ml_failure(entity_id, "fit")
+            _LOGGER.debug("ML fit failed for %s", entity_id)
             return False
 
         self._last_ml_fit_utc = now
-        self._register_ml_success()
         _LOGGER.debug(
             "ML fit finished for %s at %s response_keys=%s",
             entity_id,
@@ -223,36 +155,15 @@ class MLForecastService:
         if prediction_horizon == 0:
             return []
 
-        if self._ml_fallback_locked:
-            _LOGGER.debug(
-                "ML predict disabled after %s consecutive failures; using fallback profile",
-                _MAX_ML_TRAIN_FAILURES,
-            )
-            return None
-
-        try:
-            async with asyncio.timeout(_ML_PREDICT_TIMEOUT_SECONDS):
-                ml_forecast_w = (
-                    await self.coordinator.emhass.async_forecast_model_predict(
-                        var_model=entity_id,
-                        prediction_horizon=prediction_horizon,
-                        optimization_time_step_minutes=optimization_time_step_minutes,
-                    )
-                )
-        except TimeoutError:
-            _LOGGER.warning(
-                "ML predict timed out for %s after %ss",
-                entity_id,
-                _ML_PREDICT_TIMEOUT_SECONDS,
-            )
-            ml_forecast_w = None
-
+        ml_forecast_w = await self.coordinator.emhass.async_forecast_model_predict(
+            var_model=entity_id,
+            prediction_horizon=prediction_horizon,
+            optimization_time_step_minutes=optimization_time_step_minutes,
+        )
         if ml_forecast_w is None:
-            self._register_ml_failure(entity_id, "predict")
             _LOGGER.debug("ML predict failed for %s", entity_id)
             return None
 
-        self._register_ml_success()
         _LOGGER.debug(
             "ML predict finished for %s with %s values",
             entity_id,
@@ -266,15 +177,6 @@ class MLForecastService:
         buckets: list[OptimizationBucket],
     ) -> None:
         """Populate load forecast in buckets using ML prediction or profile fallback."""
-        if self._ml_fallback_locked:
-            _LOGGER.debug(
-                "ML fallback lock active for %s, using profile fallback",
-                entity_id,
-            )
-            profile = await self.coordinator.async_build_load_profile(entity_id)
-            await self.coordinator.async_hourly_from_load_profile(buckets, profile)
-            return
-
         if not await self.async_has_sufficient_history(entity_id):
             _LOGGER.debug(
                 "Insufficient history for ML forecast (%s), using profile fallback",

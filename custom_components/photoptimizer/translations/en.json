@@ -6,7 +6,6 @@
         "error": {
             "cannot_connect": "Failed to connect to Forecast.Solar",
             "cannot_connect_emhass": "Failed to connect to EMHASS",
-            "inverter_entities_required": "Set inverter mode and discharge entities, or enable print-only mode.",
             "unknown": "Unexpected error occurred"
         },
         "step": {
@@ -57,7 +56,6 @@
                     "battery_target_soc_percent": "Target state of charge (%)",
                     "current_consumption_entity": "Household load",
                     "current_solar_production_entity": "Current solar production",
-                    "command_log_only": "Print commands only (do not control inverter)",
                     "emhass_token": "EMHASS access token (optional)",
                     "emhass_url": "EMHASS URL",
                     "growatt_ac_charge_switch_entity": "Growatt AC charge switch (optional)",
@@ -76,7 +74,6 @@
                     "battery_soc_entity": "Entity with the current battery state of charge.",
                     "battery_soc_reserve_percent": "Minimum reserve SOC that should be preserved.",
                     "battery_target_soc_percent": "Target SOC at the end of optimization horizon.",
-                    "command_log_only": "Enable this to run without GoodWe/Growatt entities. Commands are only written to logs.",
                     "current_consumption_entity": "Entity used for load history and current consumption.",
                     "current_solar_production_entity": "Entity with current PV production power used for near-term forecast correction.",
                     "emhass_token": "Optional Bearer token for EMHASS API.",
@@ -91,6 +88,16 @@
                 },
                 "description": "Select inverter entities. Household load is used for current load and EMHASS ML load forecast from history.",
                 "title": "Configure inverter data"
+            },
+            "inverter_connection": {
+                "data": {
+                    "connect_inverter_entities": "Connect inverter entities"
+                },
+                "data_description": {
+                    "connect_inverter_entities": "Enable this to bind GoodWe or Growatt entities. Disable it to run in command-only mode and log the commands instead of calling inverter entities."
+                },
+                "description": "Choose whether Photoptimizer should connect to inverter entities or only print the commands it would send.",
+                "title": "Configure inverter connection mode"
             },
             "inverter_type": {
                 "data": {

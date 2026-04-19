@@ -60,7 +60,6 @@ _PV_BIAS_MAX_FACTOR = 1.4
 _PV_BIAS_MIN_FORECAST_W = 50.0
 _PV_BIAS_APPLY_BUCKETS = 4
 _OPTIMIZATION_TIME_STEP_MINUTES = 15
-_MPC_OPTIMIZATION_TIMEOUT_SECONDS = 180
 
 
 class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
@@ -87,7 +86,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                         operating_minutes=int(raw_load["operating_minutes"]),
                     )
                 )
-            except (KeyError, TypeError, ValueError):
+            except KeyError, TypeError, ValueError:
                 _LOGGER.debug(
                     "Skipping invalid deferrable load definition: %s", raw_load
                 )
@@ -175,7 +174,6 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         self._last_execution_applied: bool | None = None
         self._last_deferrable_loads_applied: bool | None = None
         self._optimizer_enabled: bool = True
-        self._ml_forecast_enabled: bool = False
         _LOGGER.debug(
             "Coordinator initialized for entry_id=%s emhass_url=%s token=%s",
             entry.entry_id,
@@ -191,15 +189,6 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
     async def async_set_optimizer_enabled(self, enabled: bool) -> None:
         """Enable/disable optimization runs."""
         self._optimizer_enabled = enabled
-
-    @property
-    def ml_forecast_enabled(self) -> bool:
-        """Return whether ML forecasting is allowed."""
-        return self._ml_forecast_enabled
-
-    async def async_set_ml_forecast_enabled(self, enabled: bool) -> None:
-        """Enable/disable ML forecasting."""
-        self._ml_forecast_enabled = enabled
 
     def _log_step_start(self, step: str, detail: str | None = None) -> None:
         """Log start of an orchestrated integration step."""
@@ -382,11 +371,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
             },
         }
 
-    async def _async_collect_inputs(
-        self,
-        *,
-        allow_ml_forecast: bool = True,
-    ) -> tuple[OptimizationInputs, Any | None]:
+    async def _async_collect_inputs(self) -> tuple[OptimizationInputs, Any | None]:
         """Collect timeline and plant inputs needed for EMHASS calls."""
         timeline: list[OptimizationBucket] = []
         tz_name = self.entry.data.get(CONF_TIMEZONE) or self.hass.config.time_zone
@@ -458,20 +443,13 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
 
         load_entity = self.entry.data.get(CONF_CURRENT_CONSUMPTION_ENTITY)
         if load_entity:
-            if allow_ml_forecast:
-                _LOGGER.debug(
-                    "Using load entity for ML forecast: %s",
-                    load_entity,
-                )
-                await self.ml_forecast.async_populate_load_from_ml_or_profile(
-                    load_entity, timeline
-                )
-            else:
-                _LOGGER.debug(
-                    "ML forecast disabled for this cycle, using profile fallback"
-                )
-                load_profile = await self._build_load_profile(load_entity)
-                await self._hourly_from_load_profile(timeline, load_profile)
+            _LOGGER.debug(
+                "Using load entity for ML forecast: %s",
+                load_entity,
+            )
+            await self.ml_forecast.async_populate_load_from_ml_or_profile(
+                load_entity, timeline
+            )
         else:
             _LOGGER.debug("No load entity configured, using default profile")
             load_profile = await self._build_load_profile(None)
@@ -868,9 +846,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         try:
             _LOGGER.debug("Coordinator refresh started")
             async with asyncio.timeout(30):
-                optimization_inputs, raw_pv = await self._async_collect_inputs(
-                    allow_ml_forecast=self._ml_forecast_enabled,
-                )
+                optimization_inputs, raw_pv = await self._async_collect_inputs()
                 if _LOGGER.isEnabledFor(logging.DEBUG):
                     self._log_timeline(optimization_inputs.timeline)
                 result = self._build_result(optimization_inputs, raw_pv)
@@ -883,8 +859,6 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
 
         except ForecastSolarError as err:
             raise UpdateFailed(f"Forecast.Solar API error: {err}") from err
-        except TimeoutError as err:
-            raise UpdateFailed("Coordinator refresh timed out") from err
 
     async def async_run_mpc_optimization(self) -> None:
         """Run one naive MPC optimization call to EMHASS."""
@@ -894,10 +868,19 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                 self._log_step_ok("mpc_optimization", "optimizer disabled, skipped")
                 return
             try:
-                async with asyncio.timeout(_MPC_OPTIMIZATION_TIMEOUT_SECONDS):
-                    optimization_inputs, raw_pv = await self._async_collect_inputs(
-                        allow_ml_forecast=self._ml_forecast_enabled,
-                    )
+                async with asyncio.timeout(90):
+                    load_entity = self.entry.data.get(CONF_CURRENT_CONSUMPTION_ENTITY)
+                    if (
+                        load_entity
+                        and await self.ml_forecast.async_has_sufficient_history(
+                            load_entity
+                        )
+                    ):
+                        await self.ml_forecast.async_train_model(
+                            load_entity,
+                            force=True,
+                        )
+                    optimization_inputs, raw_pv = await self._async_collect_inputs()
                     optimization_result = (
                         await self.emhass.async_run_naive_optimization(
                             optimization_inputs
@@ -948,17 +931,9 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
             if not self._optimizer_enabled:
                 self._log_step_ok("mpc_publish", "optimizer disabled, skipped")
                 return
-            if self._last_optimization_utc is None:
-                self._log_step_ok(
-                    "mpc_publish",
-                    "skipped: no successful optimization available",
-                )
-                return
             try:
                 async with asyncio.timeout(60):
-                    optimization_inputs, raw_pv = await self._async_collect_inputs(
-                        allow_ml_forecast=self._ml_forecast_enabled,
-                    )
+                    optimization_inputs, raw_pv = await self._async_collect_inputs()
                     publish_result = await self.emhass.async_publish_data(
                         optimization_inputs.optimization_time_step_minutes
                     )

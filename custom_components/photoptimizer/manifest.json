@@ -1,7 +1,7 @@
 {
   "domain": "photoptimizer",
   "name": "Photoptimizer",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "codeowners": ["@afariz1"],
   "config_flow": true,
   "dependencies": ["recorder"],

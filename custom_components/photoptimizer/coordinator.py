@@ -468,9 +468,9 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                 )
             else:
                 _LOGGER.debug(
-                    "ML forecast disabled for this cycle, using default profile"
+                    "ML forecast disabled for this cycle, using profile fallback"
                 )
-                load_profile = await self._build_load_profile(None)
+                load_profile = await self._build_load_profile(load_entity)
                 await self._hourly_from_load_profile(timeline, load_profile)
         else:
             _LOGGER.debug("No load entity configured, using default profile")
@@ -895,7 +895,9 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                 return
             try:
                 async with asyncio.timeout(_MPC_OPTIMIZATION_TIMEOUT_SECONDS):
-                    optimization_inputs, raw_pv = await self._async_collect_inputs()
+                    optimization_inputs, raw_pv = await self._async_collect_inputs(
+                        allow_ml_forecast=self._ml_forecast_enabled,
+                    )
                     optimization_result = (
                         await self.emhass.async_run_naive_optimization(
                             optimization_inputs
@@ -954,7 +956,9 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                 return
             try:
                 async with asyncio.timeout(60):
-                    optimization_inputs, raw_pv = await self._async_collect_inputs()
+                    optimization_inputs, raw_pv = await self._async_collect_inputs(
+                        allow_ml_forecast=self._ml_forecast_enabled,
+                    )
                     publish_result = await self.emhass.async_publish_data(
                         optimization_inputs.optimization_time_step_minutes
                     )

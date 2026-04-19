@@ -87,7 +87,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                         operating_minutes=int(raw_load["operating_minutes"]),
                     )
                 )
-            except KeyError, TypeError, ValueError:
+            except (KeyError, TypeError, ValueError):
                 _LOGGER.debug(
                     "Skipping invalid deferrable load definition: %s", raw_load
                 )
@@ -191,6 +191,15 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
     async def async_set_optimizer_enabled(self, enabled: bool) -> None:
         """Enable/disable optimization runs."""
         self._optimizer_enabled = enabled
+
+    @property
+    def ml_forecast_enabled(self) -> bool:
+        """Return whether ML forecasting is allowed."""
+        return self._ml_forecast_enabled
+
+    async def async_set_ml_forecast_enabled(self, enabled: bool) -> None:
+        """Enable/disable ML forecasting."""
+        self._ml_forecast_enabled = enabled
 
     def _log_step_start(self, step: str, detail: str | None = None) -> None:
         """Log start of an orchestrated integration step."""
@@ -870,11 +879,6 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                     optimization_inputs.prediction_horizon,
                     optimization_inputs.optimization_time_step_minutes,
                 )
-                if not self._ml_forecast_enabled:
-                    self._ml_forecast_enabled = True
-                    _LOGGER.debug(
-                        "Initial refresh completed; ML forecast enabled for subsequent cycles"
-                    )
                 return result
 
         except ForecastSolarError as err:
@@ -941,6 +945,12 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
             self._log_step_start("mpc_publish")
             if not self._optimizer_enabled:
                 self._log_step_ok("mpc_publish", "optimizer disabled, skipped")
+                return
+            if self._last_optimization_utc is None:
+                self._log_step_ok(
+                    "mpc_publish",
+                    "skipped: no successful optimization available",
+                )
                 return
             try:
                 async with asyncio.timeout(60):

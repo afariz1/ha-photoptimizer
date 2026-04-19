@@ -257,11 +257,12 @@ class EmhassClient:
                         _LOGGER.error("EMHASS error %s: %s", response.status, text)
                         return None
                     _LOGGER.warning(
-                        "EMHASS %s returned %s (treating as partial success): %s",
+                        "EMHASS %s returned %s: %s",
                         action,
                         response.status,
                         text,
                     )
+                    return None
 
                 content_type = response.headers.get("Content-Type", "")
                 if "application/json" in content_type:

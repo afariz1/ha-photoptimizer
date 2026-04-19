@@ -106,12 +106,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.debug("Optimization disabled via switch; skipping MPC cycle")
             return
 
+        optimization_ok = False
         _LOGGER.debug("Scheduled MPC optimization triggered")
         try:
             await coordinator.async_run_mpc_optimization()
+            optimization_ok = True
             _LOGGER.debug("Scheduled MPC optimization finished successfully")
         except UpdateFailed as err:
             _LOGGER.warning("EMHASS MPC optimization failed: %s", err)
+
+        if not optimization_ok:
+            _LOGGER.debug(
+                "Skipping publish because optimization did not complete successfully"
+            )
+            return
 
         _LOGGER.debug("Scheduled MPC publish triggered")
         try:

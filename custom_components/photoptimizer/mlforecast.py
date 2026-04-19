@@ -36,6 +36,7 @@ class MLForecastService:
         """Initialize ML forecast service."""
         self.hass = hass
         self.coordinator = coordinator
+        self._last_ml_tune_attempt_utc: datetime | None = None
         self._last_ml_tune_utc: datetime | None = None
         self._last_ml_fit_utc: datetime | None = None
         _LOGGER.debug("MLForecastService initialized")
@@ -131,27 +132,6 @@ class MLForecastService:
             )
             return True
 
-        if (
-            self._last_ml_tune_utc is None
-            or self._last_ml_tune_utc.date() != now.date()
-        ):
-            tune_response = await self.coordinator.emhass.async_forecast_model_tune(
-                var_model=entity_id,
-            )
-            if tune_response is None:
-                _LOGGER.debug(
-                    "ML tune failed for %s, continuing with fit",
-                    entity_id,
-                )
-            else:
-                self._last_ml_tune_utc = now
-                _LOGGER.debug(
-                    "ML tune finished for %s at %s response_keys=%s",
-                    entity_id,
-                    now.isoformat(),
-                    sorted(tune_response.keys()),
-                )
-
         fit_response = await self.coordinator.emhass.async_forecast_model_fit(
             var_model=entity_id,
             optimization_time_step_minutes=optimization_time_step_minutes,
@@ -166,6 +146,44 @@ class MLForecastService:
             entity_id,
             now.isoformat(),
             sorted(fit_response.keys()),
+        )
+        return True
+
+    async def async_tune_model_once_daily(
+        self,
+        entity_id: str,
+        *,
+        force: bool = False,
+    ) -> bool:
+        """Tune EMHASS ML model once per day in a separate workflow."""
+        now = dt_util.utcnow()
+        if (
+            not force
+            and self._last_ml_tune_attempt_utc is not None
+            and self._last_ml_tune_attempt_utc.date() == now.date()
+        ):
+            _LOGGER.debug(
+                "Skipping ML tune for %s; already attempted today at %s",
+                entity_id,
+                self._last_ml_tune_attempt_utc.isoformat(),
+            )
+            return True
+
+        # Mark attempt before awaiting to avoid repeated retries when the call is cancelled/times out.
+        self._last_ml_tune_attempt_utc = now
+        tune_response = await self.coordinator.emhass.async_forecast_model_tune(
+            var_model=entity_id,
+        )
+        if tune_response is None:
+            _LOGGER.debug("ML tune failed for %s", entity_id)
+            return False
+
+        self._last_ml_tune_utc = now
+        _LOGGER.debug(
+            "ML tune finished for %s at %s response_keys=%s",
+            entity_id,
+            now.isoformat(),
+            sorted(tune_response.keys()),
         )
         return True
 

@@ -18,7 +18,6 @@ from homeassistant.util import dt as dt_util
 
 from .models import (
     DeferrableLoadDefinition,
-    EmhassExecutionResult,
     ExecutionPlan,
     ExecutionSlotCommand,
     OperationMode,
@@ -315,34 +314,6 @@ class EmhassClient:
                 extracted = self._extract_numeric_list(nested)
                 if extracted:
                     return extracted
-
-        return []
-
-    def _extract_load_forecast_from_response(
-        self,
-        response: dict[str, Any],
-        expected_points: int,
-    ) -> list[float]:
-        """Extract load forecast values from flexible EMHASS response shapes."""
-        candidate_keys = (
-            "load_power_forecast",
-            "P_Load",
-            "y_pred",
-            "prediction",
-            "predictions",
-            "data",
-        )
-
-        for key in candidate_keys:
-            if key not in response:
-                continue
-            values = self._extract_numeric_list(response[key])
-            if len(values) >= expected_points:
-                return values[:expected_points]
-
-        values = self._extract_numeric_list(response)
-        if len(values) >= expected_points:
-            return values[:expected_points]
 
         return []
 
@@ -919,39 +890,3 @@ class EmhassClient:
             "published_entities": published_entities,
             "execution_plan": execution_plan,
         }
-
-    async def async_run_naive_mpc(
-        self, inputs: OptimizationInputs
-    ) -> EmhassExecutionResult | None:
-        """Run one EMHASS naive MPC cycle and publish resulting entities.
-
-        Execution sequence:
-        1. Reachability check.
-        2. POST ``naive-mpc-optim`` with runtimeparams.
-        3. POST ``publish-data`` with minimal runtime parameters.
-        4. Wait for HA state machine to process updates.
-        5. Read and return published entity snapshots.
-
-        Returns ``None`` if any mandatory step fails.
-        """
-        _LOGGER.debug("Starting full EMHASS naive MPC cycle")
-        optimization_result = await self.async_run_naive_optimization(inputs)
-        if optimization_result is None:
-            _LOGGER.debug("Naive MPC cycle failed during optimization step")
-            return None
-
-        publish_result = await self.async_publish_data(
-            inputs.optimization_time_step_minutes
-        )
-        if publish_result is None:
-            _LOGGER.debug("Naive MPC cycle failed during publish step")
-            return None
-
-        _LOGGER.debug("Full EMHASS naive MPC cycle finished successfully")
-        return EmhassExecutionResult(
-            runtimeparams=optimization_result["runtimeparams"],
-            optimization_response=optimization_result["optimization_response"],
-            publish_response=publish_result["publish_response"],
-            published_entities=publish_result["published_entities"],
-            execution_plan=publish_result["execution_plan"],
-        )

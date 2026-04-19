@@ -170,6 +170,8 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         self._last_publish_response: dict[str, Any] = {}
         self._last_published_entities: dict[str, PublishedEntityState] = {}
         self._last_execution_plan: ExecutionPlan | None = None
+        self._last_inputs_snapshot: OptimizationInputs | None = None
+        self._last_raw_pv_snapshot: Any | None = None
         self._last_execution_utc: datetime | None = None
         self._last_execution_applied: bool | None = None
         self._last_deferrable_loads_applied: bool | None = None
@@ -265,6 +267,41 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
             return
 
         self._log_step_ok("startup_bootstrap")
+
+    async def async_run_ml_daily_tune(self) -> None:
+        """Run ML model tune in a separate daily workflow."""
+        if not self._ml_pipeline_enabled:
+            self._log_step_ok("ml_daily_tune", "ml pipeline disabled, skipped")
+            return
+
+        load_entity = self.entry.data.get(CONF_CURRENT_CONSUMPTION_ENTITY)
+        if not load_entity:
+            self._log_step_ok("ml_daily_tune", "no load entity configured, skipped")
+            return
+
+        if not await self.ml_forecast.async_has_sufficient_history(load_entity):
+            self._log_step_ok("ml_daily_tune", "insufficient history, skipped")
+            return
+
+        if self._operation_lock.locked():
+            self._log_step_ok("ml_daily_tune", "mpc operation in progress, skipped")
+            return
+
+        try:
+            await asyncio.wait_for(self._operation_lock.acquire(), timeout=0.05)
+        except TimeoutError:
+            self._log_step_ok("ml_daily_tune", "mpc operation in progress, skipped")
+            return
+
+        try:
+            self._log_step_start("ml_daily_tune", load_entity)
+            tuned = await self.ml_forecast.async_tune_model_once_daily(load_entity)
+            if not tuned:
+                self._raise_update_failed("EMHASS ML daily tune failed")
+
+            self._log_step_ok("ml_daily_tune", load_entity)
+        finally:
+            self._operation_lock.release()
 
     def _coerce_float(self, value: object) -> float | None:
         """Convert arbitrary value to float when possible."""
@@ -859,6 +896,8 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
             _LOGGER.debug("Coordinator refresh started")
             async with asyncio.timeout(30):
                 optimization_inputs, raw_pv = await self._async_collect_inputs()
+                self._last_inputs_snapshot = optimization_inputs
+                self._last_raw_pv_snapshot = raw_pv
                 if _LOGGER.isEnabledFor(logging.DEBUG):
                     self._log_timeline(optimization_inputs.timeline)
                 result = self._build_result(optimization_inputs, raw_pv)
@@ -882,6 +921,8 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
             try:
                 async with asyncio.timeout(90):
                     optimization_inputs, raw_pv = await self._async_collect_inputs()
+                    self._last_inputs_snapshot = optimization_inputs
+                    self._last_raw_pv_snapshot = raw_pv
                     optimization_result = (
                         await self.emhass.async_run_naive_optimization(
                             optimization_inputs
@@ -934,9 +975,8 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                 return
             try:
                 async with asyncio.timeout(60):
-                    optimization_inputs, raw_pv = await self._async_collect_inputs()
                     publish_result = await self.emhass.async_publish_data(
-                        optimization_inputs.optimization_time_step_minutes
+                        _OPTIMIZATION_TIME_STEP_MINUTES
                     )
                     if publish_result is None:
                         self._raise_update_failed("EMHASS MPC publish-data failed")
@@ -968,11 +1008,22 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                         self._last_deferrable_loads_applied = False
                         _LOGGER.warning("Executor apply failed: %s", err)
 
-                    if _LOGGER.isEnabledFor(logging.DEBUG):
-                        self._log_timeline(optimization_inputs.timeline)
+                    if (
+                        _LOGGER.isEnabledFor(logging.DEBUG)
+                        and self._last_inputs_snapshot is not None
+                    ):
+                        self._log_timeline(self._last_inputs_snapshot.timeline)
+
+                    snapshot_inputs = self._last_inputs_snapshot
+                    if snapshot_inputs is None:
+                        snapshot_inputs = OptimizationInputs(
+                            timeline=[],
+                            battery_soc=self._read_battery_soc(),
+                            deferrable_loads=self.deferrable_loads,
+                        )
 
                     self.async_set_updated_data(
-                        self._build_result(optimization_inputs, raw_pv)
+                        self._build_result(snapshot_inputs, self._last_raw_pv_snapshot)
                     )
                     self._log_step_ok(
                         "mpc_publish",

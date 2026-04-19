@@ -22,6 +22,7 @@ _LOGGER = logging.getLogger(__name__)
 
 _PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SWITCH]
 _MPC_INTERVAL = timedelta(minutes=5)
+_ML_TUNE_INTERVAL = timedelta(hours=24)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -120,11 +121,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except UpdateFailed as err:
             _LOGGER.warning("EMHASS MPC publish-data failed: %s", err)
 
+    async def _async_handle_ml_daily_tune() -> None:
+        """Run one background ML tune cycle."""
+        _LOGGER.debug("Scheduled ML daily tune triggered")
+        try:
+            await coordinator.async_run_ml_daily_tune()
+            _LOGGER.debug("Scheduled ML daily tune finished")
+        except UpdateFailed as err:
+            _LOGGER.warning("EMHASS ML daily tune failed: %s", err)
+
     async def _async_handle_startup() -> None:
         """Run startup sequence: optimize, publish."""
         _LOGGER.debug("Startup started")
         coordinator.enable_ml_pipeline()
         await _async_handle_mpc_cycle()
+        hass.async_create_task(_async_handle_ml_daily_tune())
         _LOGGER.debug("Startup bootstrap cycle finished")
 
     @callback
@@ -138,6 +149,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass,
             _mpc_schedule_listener,
             _MPC_INTERVAL,
+        )
+    )
+
+    @callback
+    def _ml_tune_schedule_listener(_: object) -> None:
+        """Schedule one ML tune cycle every configured interval."""
+        _LOGGER.debug("ML tune schedule fired")
+        hass.async_create_task(_async_handle_ml_daily_tune())
+
+    entry.async_on_unload(
+        async_track_time_interval(
+            hass,
+            _ml_tune_schedule_listener,
+            _ML_TUNE_INTERVAL,
         )
     )
 

@@ -61,8 +61,8 @@
           "growatt_ac_charge_switch_entity": "Growatt AC charge switch (optional)",
           "growatt_device_id": "Growatt device (optional)",
           "growatt_inverter_variant": "Growatt inverter variant",
-          "inverter_command_only": "Log commands only (no inverter control)",
           "inverter_charge_power_entity": "Inverter charge power entity (optional)",
+          "inverter_command_only": "Log commands only (no inverter control)",
           "inverter_discharge_power_entity": "Inverter discharge power entity",
           "inverter_mode_entity": "Inverter operation mode entity",
           "wear_cost_per_kwh": "Battery wear cost (per kWh)"
@@ -82,8 +82,8 @@
           "growatt_ac_charge_switch_entity": "Optional switch entity for enabling AC charging on Growatt inverters.",
           "growatt_device_id": "Optional Growatt device for direct growatt_server service calls.",
           "growatt_inverter_variant": "Select MIN/SPH if known; otherwise keep Auto.",
-          "inverter_command_only": "Enable to skip all inverter control entities and only log planned commands to debug output.",
           "inverter_charge_power_entity": "Optional number entity used for inverter charging power percentage.",
+          "inverter_command_only": "Enable to skip all inverter control entities and only log planned commands to debug output.",
           "inverter_discharge_power_entity": "Number entity used for inverter discharging power percentage.",
           "inverter_mode_entity": "Select entity used to set inverter operating mode (for example general, eco_charge, eco_discharge).",
           "wear_cost_per_kwh": "Optional battery degradation penalty per cycled kWh."

@@ -1119,7 +1119,17 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                     self._last_execution_plan = publish_result["execution_plan"]
                     self._last_publish_utc = dt_util.utcnow()
 
+                    if self._last_execution_plan is not None:
+                        _LOGGER.info(
+                            "Publish produced execution plan: valid=%s source=%s slots=%s step=%s",
+                            self._last_execution_plan.valid,
+                            self._last_execution_plan.source,
+                            len(self._last_execution_plan.slots),
+                            self._last_execution_plan.step_minutes,
+                        )
+
                     try:
+                        _LOGGER.debug("Executor apply phase started")
                         self._last_execution_applied = (
                             await self.executor.async_execute_plan(
                                 self._last_execution_plan
@@ -1132,6 +1142,11 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                             )
                         )
                         self._last_execution_utc = dt_util.utcnow()
+                        _LOGGER.info(
+                            "Executor apply phase finished: plan_applied=%s deferrable_loads_applied=%s",
+                            self._last_execution_applied,
+                            self._last_deferrable_loads_applied,
+                        )
                     except (
                         HomeAssistantError,
                         RuntimeError,

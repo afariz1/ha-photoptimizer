@@ -317,6 +317,24 @@ class EmhassClient:
 
         return []
 
+    def _contains_infeasible_marker(self, value: object) -> bool:
+        """Return True when payload text indicates infeasible/unbounded optimization."""
+        if isinstance(value, dict):
+            return any(self._contains_infeasible_marker(item) for item in value.values())
+
+        if isinstance(value, list):
+            return any(self._contains_infeasible_marker(item) for item in value)
+
+        if isinstance(value, str):
+            marker = value.lower()
+            return (
+                "infeasible" in marker
+                or "unbounded" in marker
+                or "cannot be evaluated" in marker
+            )
+
+        return False
+
     def _ml_num_lags_for_step(self, optimization_time_step_minutes: int) -> int:
         """Return one-day lag count for a given optimization step."""
         if optimization_time_step_minutes <= 0:
@@ -706,6 +724,20 @@ class EmhassClient:
         )
         if optimization_response is None:
             _LOGGER.debug("EMHASS naive optimization failed: no response")
+            return None
+
+        response_status = optimization_response.get("status")
+        if isinstance(response_status, int) and response_status not in (200, 201):
+            _LOGGER.warning(
+                "EMHASS naive optimization failed: non-success status=%s",
+                response_status,
+            )
+            return None
+
+        if self._contains_infeasible_marker(optimization_response):
+            _LOGGER.warning(
+                "EMHASS naive optimization failed: infeasible/unbounded result"
+            )
             return None
 
         _LOGGER.debug("EMHASS naive optimization finished successfully")

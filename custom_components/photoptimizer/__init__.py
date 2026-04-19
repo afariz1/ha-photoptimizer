@@ -114,6 +114,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.debug("Scheduled MPC optimization finished successfully")
         except UpdateFailed as err:
             _LOGGER.warning("EMHASS MPC optimization failed: %s", err)
+            return
 
         _LOGGER.debug("Scheduled MPC publish triggered")
         try:

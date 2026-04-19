@@ -40,9 +40,18 @@ class PhotoptimizerExecutor:
         Returns True when a command was effectively sent.
         """
         if execution_plan is None:
+            _LOGGER.debug("Executor received no execution plan, skipping")
             return False
 
         now_utc = dt_util.utcnow()
+        _LOGGER.debug(
+            "Executor evaluating plan: valid=%s source=%s slots=%s plan_ts=%s now=%s",
+            execution_plan.valid,
+            execution_plan.source,
+            len(execution_plan.slots),
+            execution_plan.timestamp.isoformat(),
+            now_utc.isoformat(),
+        )
         command = next(
             (
                 slot
@@ -70,6 +79,9 @@ class PhotoptimizerExecutor:
 
         if command is None:
             if not execution_plan.valid:
+                _LOGGER.debug(
+                    "Executor using safe fallback command because execution plan is invalid"
+                )
                 command = ExecutionSlotCommand(
                     slot_start=now_utc,
                     p_bat_cmd=0,
@@ -78,6 +90,9 @@ class PhotoptimizerExecutor:
                     op_mode=OperationMode.AUTO,
                 )
             else:
+                _LOGGER.debug(
+                    "Executor found no current command in a valid plan, skipping apply"
+                )
                 return False
 
         if not execution_plan.valid and command.op_mode == OperationMode.AUTO:
@@ -89,10 +104,25 @@ class PhotoptimizerExecutor:
         else:
             signature = (command.slot_start, command.p_bat_cmd, command.op_mode.value)
         if signature == self._last_signature:
+            _LOGGER.debug(
+                "Executor command unchanged, skipping apply: slot=%s mode=%s power=%s",
+                command.slot_start.isoformat(),
+                command.op_mode.value,
+                command.p_bat_cmd,
+            )
             return False
 
+        _LOGGER.info(
+            "Executor applying command: slot=%s mode=%s power=%s soc_target=%s grid_limit=%s",
+            command.slot_start.isoformat(),
+            command.op_mode.value,
+            command.p_bat_cmd,
+            command.soc_target,
+            command.grid_limit,
+        )
         await self._controller.async_apply(command)
         self._last_signature = signature
+        _LOGGER.info("Executor command applied successfully")
         return True
 
     async def async_execute_deferrable_loads(
@@ -103,25 +133,58 @@ class PhotoptimizerExecutor:
         """Apply the current EMHASS deferrable-load state to switch entities."""
         applied = False
 
+        _LOGGER.debug(
+            "Executor evaluating deferrable loads: configured=%s published=%s",
+            len(deferrable_loads),
+            len(published_entities),
+        )
+
         for index, load in enumerate(deferrable_loads):
             entity_key = f"deferrable_load_{index}"
             published_entity = published_entities.get(entity_key)
             if published_entity is None:
+                _LOGGER.debug(
+                    "Executor deferrable load missing in published entities: index=%s entity_id=%s",
+                    index,
+                    load.entity_id,
+                )
                 continue
 
             state = published_entity.state
             if state is None:
+                _LOGGER.debug(
+                    "Executor deferrable load has no state yet: index=%s entity_id=%s",
+                    index,
+                    load.entity_id,
+                )
                 continue
 
             try:
                 desired_on = float(state) > _LOAD_POWER_THRESHOLD_W
-            except TypeError, ValueError:
+            except (TypeError, ValueError):
+                _LOGGER.debug(
+                    "Executor deferrable load state not numeric: index=%s entity_id=%s state=%s",
+                    index,
+                    load.entity_id,
+                    state,
+                )
                 continue
 
             if self._last_deferrable_signatures.get(load.entity_id) == desired_on:
+                _LOGGER.debug(
+                    "Executor deferrable load unchanged: entity_id=%s desired_on=%s",
+                    load.entity_id,
+                    desired_on,
+                )
                 continue
 
             service_name = "turn_on" if desired_on else "turn_off"
+            _LOGGER.info(
+                "Executor applying deferrable load: entity_id=%s service=%s published_state=%s",
+                load.entity_id,
+                service_name,
+                state,
+            )
             await self._hass.services.async_call(
                 "switch",
                 service_name,
@@ -138,4 +201,5 @@ class PhotoptimizerExecutor:
                 load.entity_id,
             )
 
+        _LOGGER.debug("Executor deferrable load pass completed: applied=%s", applied)
         return applied

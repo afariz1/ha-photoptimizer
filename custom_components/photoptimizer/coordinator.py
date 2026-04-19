@@ -891,17 +891,6 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                 return
             try:
                 async with asyncio.timeout(_MPC_OPTIMIZATION_TIMEOUT_SECONDS):
-                    load_entity = self.entry.data.get(CONF_CURRENT_CONSUMPTION_ENTITY)
-                    if (
-                        load_entity
-                        and await self.ml_forecast.async_has_sufficient_history(
-                            load_entity
-                        )
-                    ):
-                        await self.ml_forecast.async_train_model(
-                            load_entity,
-                            force=True,
-                        )
                     optimization_inputs, raw_pv = await self._async_collect_inputs()
                     optimization_result = (
                         await self.emhass.async_run_naive_optimization(

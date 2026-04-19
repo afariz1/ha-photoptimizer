@@ -1,0 +1,174 @@
+{
+  "config": {
+    "abort": {
+      "already_configured": "This Photoptimizer location is already configured."
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to Forecast.Solar",
+      "cannot_connect_emhass": "Failed to connect to EMHASS",
+      "unknown": "Unexpected error occurred"
+    },
+    "step": {
+      "deferrable_load": {
+        "data": {
+          "entity_id": "Switch entity",
+          "name": "Load name",
+          "nominal_power_w": "Nominal power (W)",
+          "operating_minutes": "Minimum operating time (minutes)"
+        },
+        "data_description": {
+          "entity_id": "Switch entity that will be turned on or off from the EMHASS result.",
+          "name": "User-facing label for the deferrable load.",
+          "nominal_power_w": "Nominal power used by EMHASS when scheduling the load.",
+          "operating_minutes": "Minimum runtime that EMHASS should keep the load active."
+        },
+        "description": "Define one deferrable load.",
+        "title": "Configure deferrable load"
+      },
+      "deferrable_load_count": {
+        "data": {
+          "deferrable_load_count": "Deferrable load count"
+        },
+        "data_description": {
+          "deferrable_load_count": "Number of switch-based deferrable loads to configure (0 to 2)."
+        },
+        "description": "Choose how many deferrable loads should be managed by EMHASS.",
+        "title": "Configure deferrable loads"
+      },
+      "electricity_price": {
+        "data": {
+          "electricity_price_entity": "Electricity price entity"
+        },
+        "data_description": {
+          "electricity_price_entity": "Entity with hourly electricity price forecast attributes."
+        },
+        "description": "Select the electricity price entity.",
+        "title": "Configure electricity spot price"
+      },
+      "inverter": {
+        "data": {
+          "battery_capacity_kwh": "Battery capacity (kWh)",
+          "battery_charge_power_max": "Max battery charging power (W)",
+          "battery_discharge_power_max": "Max battery discharging power (W)",
+          "battery_efficiency_round_trip": "Round-trip efficiency (%)",
+          "battery_soc_entity": "Battery state of charge",
+          "battery_soc_reserve_percent": "Reserve state of charge (%)",
+          "battery_target_soc_percent": "Target state of charge (%)",
+          "current_consumption_entity": "Household load",
+          "current_solar_production_entity": "Current solar production",
+          "emhass_token": "EMHASS access token (optional)",
+          "emhass_url": "EMHASS URL",
+          "growatt_ac_charge_switch_entity": "Growatt AC charge switch (optional)",
+          "growatt_device_id": "Growatt device (optional)",
+          "growatt_inverter_variant": "Growatt inverter variant",
+          "inverter_charge_power_entity": "Inverter charge power entity (optional)",
+          "inverter_discharge_power_entity": "Inverter discharge power entity",
+          "inverter_mode_entity": "Inverter operation mode entity",
+          "wear_cost_per_kwh": "Battery wear cost (per kWh)"
+        },
+        "data_description": {
+          "battery_capacity_kwh": "Usable battery capacity in kWh.",
+          "battery_charge_power_max": "Maximum allowed battery charging power.",
+          "battery_discharge_power_max": "Maximum allowed battery discharging power.",
+          "battery_efficiency_round_trip": "Round-trip battery efficiency used by optimizer.",
+          "battery_soc_entity": "Entity with the current battery state of charge.",
+          "battery_soc_reserve_percent": "Minimum reserve SOC that should be preserved.",
+          "battery_target_soc_percent": "Target SOC at the end of optimization horizon.",
+          "current_consumption_entity": "Entity used for load history and current consumption.",
+          "current_solar_production_entity": "Entity with current PV production power used for near-term forecast correction.",
+          "emhass_token": "Optional Bearer token for EMHASS API.",
+          "emhass_url": "Base URL of your EMHASS instance.",
+          "growatt_ac_charge_switch_entity": "Optional switch entity for enabling AC charging on Growatt inverters.",
+          "growatt_device_id": "Optional Growatt device for direct growatt_server service calls.",
+          "growatt_inverter_variant": "Select MIN/SPH if known; otherwise keep Auto.",
+          "inverter_charge_power_entity": "Optional number entity used for inverter charging power percentage.",
+          "inverter_discharge_power_entity": "Number entity used for inverter discharging power percentage.",
+          "inverter_mode_entity": "Select entity used to set inverter operating mode (for example general, eco_charge, eco_discharge).",
+          "wear_cost_per_kwh": "Optional battery degradation penalty per cycled kWh."
+        },
+        "description": "Select inverter entities. Household load is used for current load and EMHASS ML load forecast from history.",
+        "title": "Configure inverter data"
+      },
+      "inverter_type": {
+        "data": {
+          "inverter_type": "Inverter type"
+        },
+        "data_description": {
+          "inverter_type": "Choose which inverter brand should be controlled by Photoptimizer."
+        },
+        "description": "Select your inverter type.",
+        "title": "Choose inverter type"
+      },
+      "pv_forecast": {
+        "data": {
+          "api_key": "API key (optional)",
+          "azimuth": "Azimuth",
+          "declination": "Declination",
+          "kwp": "Peak power (kWp)",
+          "latitude": "Latitude",
+          "longitude": "Longitude"
+        },
+        "data_description": {
+          "api_key": "Optional Forecast.Solar API key.",
+          "azimuth": "PV array azimuth in degrees.",
+          "declination": "PV array tilt/declination in degrees.",
+          "kwp": "Installed PV peak power.",
+          "latitude": "Site latitude for Forecast.Solar.",
+          "longitude": "Site longitude for Forecast.Solar."
+        },
+        "description": "Configure Forecast.Solar parameters.",
+        "title": "Configure PV forecast"
+      },
+      "reconfigure": {
+        "data": {
+          "emhass_token": "EMHASS access token (optional)",
+          "emhass_url": "EMHASS URL"
+        },
+        "description": "Update the EMHASS URL or access token.",
+        "title": "Reconfigure EMHASS connection"
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "deferrable_load": {
+        "data": {
+          "entity_id": "Switch entity",
+          "name": "Load name",
+          "nominal_power_w": "Nominal power (W)",
+          "operating_minutes": "Minimum operating time (minutes)"
+        },
+        "data_description": {
+          "entity_id": "Switch entity that will be turned on or off from the EMHASS result.",
+          "name": "User-facing label for the deferrable load.",
+          "nominal_power_w": "Nominal power used by EMHASS when scheduling the load.",
+          "operating_minutes": "Minimum runtime that EMHASS should keep the load active."
+        },
+        "description": "Define one deferrable load.",
+        "title": "Configure deferrable load"
+      },
+      "init": {
+        "data": {
+          "deferrable_load_count": "Deferrable load count"
+        },
+        "data_description": {
+          "deferrable_load_count": "Number of switch-based deferrable loads to configure (0 to 2)."
+        },
+        "description": "Choose how many deferrable loads should be managed by EMHASS.",
+        "title": "Configure deferrable loads"
+      }
+    }
+  },
+  "triggers": {
+    "_": {
+      "description": "Triggers scheduled EMHASS actions for Photoptimizer.",
+      "fields": {
+        "trigger_type": {
+          "description": "Runs a 5-minute EMHASS MPC cycle (naive-mpc-optim and publish-data).",
+          "name": "Trigger type"
+        }
+      },
+      "name": "Photoptimizer EMHASS trigger"
+    }
+  }
+}

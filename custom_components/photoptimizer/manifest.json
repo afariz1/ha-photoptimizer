@@ -1,0 +1,13 @@
+{
+  "domain": "photoptimizer",
+  "name": "Photoptimizer",
+  "version": "0.1.0",
+  "codeowners": ["@afariz1"],
+  "config_flow": true,
+  "dependencies": ["recorder"],
+  "documentation": "https://github.com/opela/ha-photoptimizer#readme",
+  "integration_type": "service",
+  "iot_class": "local_polling",
+  "quality_scale": "bronze",
+  "requirements": ["forecast-solar==5.0.0"]
+}

@@ -5,6 +5,7 @@ This module contains load power prediction logic using EMHASS ML forecaster.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
 from functools import partial
 import logging
@@ -25,6 +26,8 @@ _LOGGER = logging.getLogger(__name__)
 _MIN_HISTORY_ROWS_FOR_ML = 288
 _HISTORY_WINDOW_DAYS_FOR_ML = 7
 _ML_SLOT_MINUTES = 15
+_ML_FIT_TIMEOUT_SECONDS = 160
+_MAX_ML_TRAIN_FAILURES = 3
 
 
 class MLForecastService:
@@ -37,6 +40,8 @@ class MLForecastService:
         self.hass = hass
         self.coordinator = coordinator
         self._last_ml_fit_utc: datetime | None = None
+        self._consecutive_fit_failures = 0
+        self._ml_fallback_locked = False
         _LOGGER.debug("MLForecastService initialized")
 
     def _coerce_float(self, value: object) -> float | None:
@@ -116,6 +121,13 @@ class MLForecastService:
         force: bool = False,
     ) -> bool:
         """Train EMHASS ML model."""
+        if self._ml_fallback_locked:
+            _LOGGER.debug(
+                "ML fit disabled after %s consecutive failures; using fallback profile",
+                _MAX_ML_TRAIN_FAILURES,
+            )
+            return False
+
         now = dt_util.utcnow()
         if (
             not force
@@ -129,14 +141,39 @@ class MLForecastService:
             )
             return True
 
-        fit_response = await self.coordinator.emhass.async_forecast_model_fit(
-            var_model=entity_id
-        )
+        try:
+            async with asyncio.timeout(_ML_FIT_TIMEOUT_SECONDS):
+                fit_response = await self.coordinator.emhass.async_forecast_model_fit(
+                    var_model=entity_id
+                )
+        except TimeoutError:
+            _LOGGER.warning(
+                "ML fit timed out for %s after %ss",
+                entity_id,
+                _ML_FIT_TIMEOUT_SECONDS,
+            )
+            fit_response = None
+
         if fit_response is None:
-            _LOGGER.debug("ML fit failed for %s", entity_id)
+            self._consecutive_fit_failures += 1
+            if self._consecutive_fit_failures >= _MAX_ML_TRAIN_FAILURES:
+                self._ml_fallback_locked = True
+                _LOGGER.warning(
+                    "ML fit failed %s times for %s; locking to fallback profile mode",
+                    self._consecutive_fit_failures,
+                    entity_id,
+                )
+            else:
+                _LOGGER.warning(
+                    "ML fit failed for %s (%s/%s), using fallback profile",
+                    entity_id,
+                    self._consecutive_fit_failures,
+                    _MAX_ML_TRAIN_FAILURES,
+                )
             return False
 
         self._last_ml_fit_utc = now
+        self._consecutive_fit_failures = 0
         _LOGGER.debug(
             "ML fit finished for %s at %s response_keys=%s",
             entity_id,

@@ -320,7 +320,9 @@ class EmhassClient:
     def _contains_infeasible_marker(self, value: object) -> bool:
         """Return True when payload text indicates infeasible/unbounded optimization."""
         if isinstance(value, dict):
-            return any(self._contains_infeasible_marker(item) for item in value.values())
+            return any(
+                self._contains_infeasible_marker(item) for item in value.values()
+            )
 
         if isinstance(value, list):
             return any(self._contains_infeasible_marker(item) for item in value)
@@ -348,38 +350,88 @@ class EmhassClient:
         expected_points: int,
     ) -> list[float]:
         """Extract ML forecast values from a published Home Assistant sensor."""
-        table = attributes.get("forecasts")
-        if isinstance(table, list):
-            schedule = self._extract_schedule(table, value_key="p_load_forecast")
-            values = [value for _, value in schedule]
-            if len(values) >= expected_points:
-                return values[:expected_points]
+        _LOGGER.debug(
+            "Inspecting ML publish attributes: keys=%s expected_points=%s",
+            sorted(attributes.keys()),
+            expected_points,
+        )
 
-            # Fallback for custom key names emitted by some EMHASS versions.
-            values = []
-            for row in table:
-                if not isinstance(row, dict):
+        candidate_tables = []
+        for key in ("scheduled_forecast", "forecasts"):
+            table = attributes.get(key)
+            if isinstance(table, list):
+                candidate_tables.append((key, table))
+
+        if candidate_tables:
+            for table_name, table in candidate_tables:
+                value_keys: list[str] = []
+                for row in table:
+                    if not isinstance(row, dict):
+                        continue
+
+                    for row_key in row.keys():
+                        if row_key != "date" and row_key not in value_keys:
+                            value_keys.append(row_key)
+
+                _LOGGER.debug(
+                    "Trying ML forecast table=%s rows=%s value_keys=%s",
+                    table_name,
+                    len(table),
+                    value_keys,
+                )
+
+                if not value_keys:
                     continue
 
-                numeric: float | None = None
-                for row_key, row_value in row.items():
-                    if row_key == "date":
+                for value_key in value_keys:
+                    schedule = self._extract_schedule(table, value_key=value_key)
+                    values = [value for _, value in schedule]
+                    if len(values) >= expected_points:
+                        _LOGGER.debug(
+                            "Extracted ML forecast from table=%s using value_key=%s points=%s",
+                            table_name,
+                            value_key,
+                            len(values),
+                        )
+                        return values[:expected_points]
+
+                values = []
+                for row in table:
+                    if not isinstance(row, dict):
                         continue
-                    numeric = self._coerce_float(row_value)
+
+                    numeric: float | None = None
+                    for row_key, row_value in row.items():
+                        if row_key == "date":
+                            continue
+                        numeric = self._coerce_float(row_value)
+                        if numeric is not None:
+                            break
+
                     if numeric is not None:
-                        break
+                        values.append(numeric)
 
-                if numeric is not None:
-                    values.append(numeric)
+                if len(values) >= expected_points:
+                    _LOGGER.debug(
+                        "Extracted ML forecast from table=%s using fallback row scan points=%s",
+                        table_name,
+                        len(values),
+                    )
+                    return values[:expected_points]
 
-            if len(values) >= expected_points:
-                return values[:expected_points]
-
-        # Final defensive fallback for unknown attribute layouts.
         values = self._extract_numeric_list(attributes)
         if len(values) >= expected_points:
+            _LOGGER.debug(
+                "Extracted ML forecast from nested attributes fallback points=%s",
+                len(values),
+            )
             return values[:expected_points]
 
+        _LOGGER.debug(
+            "ML publish attributes did not contain enough forecast points: found=%s expected=%s",
+            len(values),
+            expected_points,
+        )
         return []
 
     async def _async_read_ml_predict_sensor(

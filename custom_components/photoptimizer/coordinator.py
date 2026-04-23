@@ -788,10 +788,36 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
 
         state = await self._async_get_state_with_startup_wait(entity_id)
         if state is None:
+            _LOGGER.debug(
+                "Published ML forecast entity %s not available for load ingest",
+                entity_id,
+            )
             return False
 
-        forecasts = state.attributes.get("forecasts")
+        _LOGGER.debug(
+            "Published ML forecast entity %s state=%s available_keys=%s",
+            entity_id,
+            state.state,
+            sorted(state.attributes.keys()),
+        )
+
+        forecasts = None
+        for attr_name in ("scheduled_forecast", "forecasts"):
+            candidate = state.attributes.get(attr_name)
+            if isinstance(candidate, list):
+                forecasts = candidate
+                _LOGGER.debug(
+                    "Using ML forecast attribute %s with %s rows",
+                    attr_name,
+                    len(candidate),
+                )
+                break
+
         if not isinstance(forecasts, list):
+            _LOGGER.debug(
+                "Published ML forecast entity %s did not expose forecast list attributes",
+                entity_id,
+            )
             return False
 
         first_bucket_utc = dt_util.as_utc(buckets[0].start).replace(
@@ -826,6 +852,22 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
 
             if numeric is not None:
                 values_by_slot_utc[slot_utc] = numeric
+
+        _LOGGER.debug(
+            "Parsed published ML forecast for %s: parsed_points=%s first_bucket=%s",
+            entity_id,
+            len(values_by_slot_utc),
+            first_bucket_utc.isoformat(),
+        )
+
+        if len(values_by_slot_utc) < len(buckets):
+            _LOGGER.debug(
+                "Published ML forecast too short or sparse for %s: parsed_points=%s needed=%s",
+                entity_id,
+                len(values_by_slot_utc),
+                len(buckets),
+            )
+            return False
 
         bucket_hours = self._bucket_hours(buckets)
         for bucket in buckets:

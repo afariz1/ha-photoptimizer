@@ -168,11 +168,50 @@
             "description": "Triggers scheduled EMHASS actions for Photoptimizer.",
             "fields": {
                 "trigger_type": {
-                    "description": "Runs a 5-minute EMHASS MPC cycle (naive-mpc-optim and publish-data).",
+                    "description": "Runs a quarter-hour EMHASS MPC cycle (naive-mpc-optim and publish-data).",
                     "name": "Trigger type"
                 }
             },
             "name": "Photoptimizer EMHASS trigger"
+        }
+    },
+    "entity": {
+        "sensor": {
+            "emhass_pv_forecast_now": {
+                "name": "EMHASS PV power forecast (now)"
+            },
+            "emhass_load_forecast_now": {
+                "name": "EMHASS load power forecast (now)"
+            },
+            "emhass_grid_forecast_now": {
+                "name": "EMHASS grid power forecast (now)"
+            },
+            "emhass_battery_soc_forecast_now": {
+                "name": "EMHASS battery SOC forecast (now)"
+            },
+            "emhass_unit_load_cost": {
+                "name": "EMHASS unit load cost"
+            },
+            "emhass_unit_prod_price": {
+                "name": "EMHASS unit production price"
+            },
+            "emhass_total_cost_fun_value": {
+                "name": "EMHASS total cost function value"
+            },
+            "emhass_optim_status": {
+                "name": "EMHASS optimization status"
+            },
+            "emhass_battery_power_now": {
+                "name": "EMHASS battery power command (now)"
+            },
+            "emhass_battery_power_next_hour": {
+                "name": "EMHASS battery power command (next hour)"
+            }
+        },
+        "switch": {
+            "optimizer": {
+                "name": "Optimizer"
+            }
         }
     }
 }

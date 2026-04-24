@@ -38,7 +38,7 @@ class PhotoptimizerSwitch(
     """Representation of a Photoptimizer switch."""
 
     _attr_has_entity_name = True
-    _attr_name = "Optimizer"
+    _attr_translation_key = "optimizer"
 
     def __init__(
         self,

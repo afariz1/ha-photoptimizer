@@ -37,6 +37,12 @@ During configuration, you will provide:
 
 Without a working EMHASS instance, MPC optimization will not run.
 
+## Known Limitations
+
+- The integration is intentionally focused on one Photoptimizer instance per Home Assistant installation.
+- Sensor and switch labels are tuned for UI clarity, but control still depends on EMHASS and the configured inverter entities.
+- The daily ML refresh and the quarter-hour MPC loop are independent tasks and can fail separately.
+
 ## Quick Configuration Steps
 
 1. Select the electricity price entity.

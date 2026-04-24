@@ -155,7 +155,7 @@ def _emhass_current_state_str(key: str) -> Callable[[dict], StateType]:
 SENSOR_TYPES: tuple[PhotoptimizerSensorEntityDescription, ...] = (
     PhotoptimizerSensorEntityDescription(
         key="emhass_pv_forecast_now",
-        name="EMHASS PV power forecast (now)",
+        translation_key="emhass_pv_forecast_now",
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfPower.WATT,
@@ -163,7 +163,7 @@ SENSOR_TYPES: tuple[PhotoptimizerSensorEntityDescription, ...] = (
     ),
     PhotoptimizerSensorEntityDescription(
         key="emhass_load_forecast_now",
-        name="EMHASS load power forecast (now)",
+        translation_key="emhass_load_forecast_now",
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfPower.WATT,
@@ -171,7 +171,7 @@ SENSOR_TYPES: tuple[PhotoptimizerSensorEntityDescription, ...] = (
     ),
     PhotoptimizerSensorEntityDescription(
         key="emhass_grid_forecast_now",
-        name="EMHASS grid power forecast (now)",
+        translation_key="emhass_grid_forecast_now",
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfPower.WATT,
@@ -179,40 +179,40 @@ SENSOR_TYPES: tuple[PhotoptimizerSensorEntityDescription, ...] = (
     ),
     PhotoptimizerSensorEntityDescription(
         key="emhass_battery_soc_forecast_now",
-        name="EMHASS battery SOC forecast (now)",
+        translation_key="emhass_battery_soc_forecast_now",
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=PERCENTAGE,
         value_fn=_emhass_current_state("battery_soc_forecast"),
     ),
     PhotoptimizerSensorEntityDescription(
         key="emhass_unit_load_cost",
-        name="EMHASS unit load cost",
+        translation_key="emhass_unit_load_cost",
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement="currency/kWh",
         value_fn=_emhass_current_state("unit_load_cost"),
     ),
     PhotoptimizerSensorEntityDescription(
         key="emhass_unit_prod_price",
-        name="EMHASS unit production price",
+        translation_key="emhass_unit_prod_price",
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement="currency/kWh",
         value_fn=_emhass_current_state("unit_prod_price"),
     ),
     PhotoptimizerSensorEntityDescription(
         key="emhass_total_cost_fun_value",
-        name="EMHASS total cost function value",
+        translation_key="emhass_total_cost_fun_value",
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement="currency",
         value_fn=_emhass_current_state("cost_fun"),
     ),
     PhotoptimizerSensorEntityDescription(
         key="emhass_optim_status",
-        name="EMHASS optimization status",
+        translation_key="emhass_optim_status",
         value_fn=_emhass_current_state_str("optim_status"),
     ),
     PhotoptimizerSensorEntityDescription(
         key="emhass_battery_power_now",
-        name="EMHASS battery power command (now)",
+        translation_key="emhass_battery_power_now",
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfPower.WATT,
@@ -220,7 +220,7 @@ SENSOR_TYPES: tuple[PhotoptimizerSensorEntityDescription, ...] = (
     ),
     PhotoptimizerSensorEntityDescription(
         key="emhass_battery_power_next_hour",
-        name="EMHASS battery power command (next hour)",
+        translation_key="emhass_battery_power_next_hour",
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfPower.WATT,

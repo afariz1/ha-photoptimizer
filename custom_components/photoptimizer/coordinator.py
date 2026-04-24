@@ -48,9 +48,11 @@ from .executor import PhotoptimizerExecutor
 from .mlforecast import MLForecastService
 from .models import (
     DeferrableLoadDefinition,
+    ExecutionSlotCommand,
     ExecutionPlan,
     OptimizationBucket,
     OptimizationInputs,
+    OperationMode,
     PublishedEntityState,
 )
 
@@ -171,11 +173,14 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         self._last_publish_response: dict[str, Any] = {}
         self._last_published_entities: dict[str, PublishedEntityState] = {}
         self._last_execution_plan: ExecutionPlan | None = None
+        self._last_valid_execution_plan: ExecutionPlan | None = None
+        self._publish_failure_streak: int = 0
         self._last_inputs_snapshot: OptimizationInputs | None = None
         self._last_raw_pv_snapshot: Any | None = None
         self._last_execution_utc: datetime | None = None
         self._last_execution_applied: bool | None = None
         self._last_deferrable_loads_applied: bool | None = None
+        self._last_valid_battery_soc: float | None = None
         self._optimizer_enabled: bool = True
         self._ml_bootstrap_completed: bool = False
         self._ml_fit_completed: bool = False
@@ -223,6 +228,95 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
     def _raise_update_failed(self, message: str) -> NoReturn:
         """Raise an update failure from helper code paths."""
         raise UpdateFailed(message)
+
+    def _build_safe_auto_plan(self, source: str) -> ExecutionPlan:
+        """Build a one-slot safe AUTO plan for emergency fallback."""
+        now_utc = dt_util.utcnow()
+        return ExecutionPlan(
+            slots=[
+                ExecutionSlotCommand(
+                    slot_start=now_utc,
+                    p_bat_cmd=0,
+                    soc_target=0,
+                    grid_limit=0,
+                    op_mode=OperationMode.AUTO,
+                )
+            ],
+            step_minutes=_OPTIMIZATION_TIME_STEP_MINUTES,
+            timestamp=now_utc,
+            valid=False,
+            source=source,
+        )
+
+    def _execution_plan_progress(
+        self, plan: ExecutionPlan, now_utc: datetime
+    ) -> tuple[int, int]:
+        """Return consumed and total slots for a cached execution plan."""
+        total_slots = len(plan.slots)
+        consumed_slots = sum(1 for slot in plan.slots if slot.slot_start <= now_utc)
+        return consumed_slots, total_slots
+
+    async def _async_recover_from_publish_failure(
+        self, reason: str, *, count_failure: bool = True
+    ) -> None:
+        """Recover after MPC failure by reusing cached plan or falling back to AUTO."""
+        if count_failure:
+            self._publish_failure_streak += 1
+        self._last_deferrable_loads_applied = False
+        now_utc = dt_util.utcnow()
+        cached_plan = self._last_valid_execution_plan
+
+        if cached_plan is not None and cached_plan.slots:
+            consumed_slots, total_slots = self._execution_plan_progress(
+                cached_plan, now_utc
+            )
+            half_threshold = (total_slots + 1) // 2
+            if consumed_slots < half_threshold:
+                _LOGGER.warning(
+                    "Publish failed (%s). Reusing cached execution plan: failure_streak=%s consumed_slots=%s total_slots=%s half_threshold=%s",
+                    reason,
+                    self._publish_failure_streak,
+                    consumed_slots,
+                    total_slots,
+                    half_threshold,
+                )
+                try:
+                    self._last_execution_applied = (
+                        await self.executor.async_execute_plan(cached_plan)
+                    )
+                    self._last_execution_plan = cached_plan
+                    self._last_execution_utc = dt_util.utcnow()
+                except (HomeAssistantError, RuntimeError, ValueError) as err:
+                    self._last_execution_applied = False
+                    _LOGGER.warning(
+                        "Executor apply failed while reusing cached plan: %s", err
+                    )
+                return
+
+            _LOGGER.warning(
+                "Publish failed (%s) and cached execution plan reached half-life: failure_streak=%s consumed_slots=%s total_slots=%s half_threshold=%s. Switching to safe AUTO mode.",
+                reason,
+                self._publish_failure_streak,
+                consumed_slots,
+                total_slots,
+                half_threshold,
+            )
+        else:
+            _LOGGER.warning(
+                "Publish failed (%s) and no cached valid execution plan exists. Switching to safe AUTO mode.",
+                reason,
+            )
+
+        safe_plan = self._build_safe_auto_plan("publish_failure_safe_auto")
+        try:
+            self._last_execution_applied = await self.executor.async_execute_plan(
+                safe_plan
+            )
+            self._last_execution_plan = safe_plan
+            self._last_execution_utc = dt_util.utcnow()
+        except (HomeAssistantError, RuntimeError, ValueError) as err:
+            self._last_execution_applied = False
+            _LOGGER.warning("Executor apply failed in safe AUTO fallback: %s", err)
 
     def _bucket_step_minutes(self, buckets: list[OptimizationBucket]) -> int:
         """Return bucket step length in minutes, using integration default as fallback."""
@@ -1033,11 +1127,22 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         soc_entity = self.entry.data.get(CONF_BATTERY_SOC_ENTITY)
         soc_state = self.hass.states.get(soc_entity) if soc_entity else None
         raw_soc = self._coerce_float(soc_state.state) if soc_state is not None else None
-        if raw_soc is None:
-            normalized_soc = 0.0
-        else:
+
+        if raw_soc is not None:
             normalized_soc = raw_soc if raw_soc <= 1.0 else raw_soc / 100.0
             normalized_soc = max(0.0, min(1.0, normalized_soc))
+            self._last_valid_battery_soc = normalized_soc
+        elif self._last_valid_battery_soc is not None:
+            normalized_soc = self._last_valid_battery_soc
+            _LOGGER.warning(
+                "Battery SOC entity %s unavailable or invalid, reusing last valid value %s",
+                soc_entity,
+                normalized_soc,
+            )
+        else:
+            raise UpdateFailed(
+                f"Battery SOC entity {soc_entity} is unavailable or invalid and no last valid value exists"
+            )
 
         _LOGGER.debug(
             "Battery SOC read from %s: raw=%s normalized=%s",
@@ -1126,19 +1231,31 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
             except ForecastSolarError as err:
                 update_failed = UpdateFailed(f"Forecast.Solar API error: {err}")
                 self._log_step_error("mpc_optimization", update_failed)
+                await self._async_recover_from_publish_failure(
+                    str(update_failed), count_failure=False
+                )
                 raise update_failed from err
             except UpdateFailed as err:
                 self._log_step_error("mpc_optimization", err)
+                await self._async_recover_from_publish_failure(
+                    str(err), count_failure=False
+                )
                 raise
             except TimeoutError as err:
                 update_failed = UpdateFailed("MPC optimization timed out")
                 self._log_step_error("mpc_optimization", update_failed)
+                await self._async_recover_from_publish_failure(
+                    str(update_failed), count_failure=False
+                )
                 raise update_failed from err
             except Exception as err:
                 update_failed = UpdateFailed(
                     f"MPC optimization unexpected error: {err}"
                 )
                 _LOGGER.exception("[ERR] mpc_optimization unexpected exception")
+                await self._async_recover_from_publish_failure(
+                    str(update_failed), count_failure=False
+                )
                 raise update_failed from err
 
     async def async_run_mpc_publish(self) -> None:
@@ -1160,6 +1277,14 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                     self._last_published_entities = publish_result["published_entities"]
                     self._last_execution_plan = publish_result["execution_plan"]
                     self._last_publish_utc = dt_util.utcnow()
+                    self._publish_failure_streak = 0
+
+                    if (
+                        self._last_execution_plan is not None
+                        and self._last_execution_plan.valid
+                        and self._last_execution_plan.slots
+                    ):
+                        self._last_valid_execution_plan = self._last_execution_plan
 
                     if self._last_execution_plan is not None:
                         _LOGGER.info(
@@ -1172,6 +1297,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
 
                     try:
                         _LOGGER.debug("Executor apply phase started")
+                        executor_apply_failed = False
                         self._last_execution_applied = (
                             await self.executor.async_execute_plan(
                                 self._last_execution_plan
@@ -1194,6 +1320,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                         RuntimeError,
                         ValueError,
                     ) as err:
+                        executor_apply_failed = True
                         self._last_execution_applied = False
                         self._last_deferrable_loads_applied = False
                         _LOGGER.warning("Executor apply failed: %s", err)
@@ -1215,23 +1342,34 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                     self.async_set_updated_data(
                         self._build_result(snapshot_inputs, self._last_raw_pv_snapshot)
                     )
-                    self._log_step_ok(
-                        "mpc_publish",
-                        f"published_entities={sorted(self._last_published_entities.keys())} "
-                        f"response_keys={sorted(self._last_publish_response.keys())}",
-                    )
+                    if executor_apply_failed:
+                        _LOGGER.warning(
+                            "Executor apply phase finished with failure: published_entities=%s response_keys=%s",
+                            sorted(self._last_published_entities.keys()),
+                            sorted(self._last_publish_response.keys()),
+                        )
+                    else:
+                        self._log_step_ok(
+                            "mpc_publish",
+                            f"published_entities={sorted(self._last_published_entities.keys())} "
+                            f"response_keys={sorted(self._last_publish_response.keys())}",
+                        )
             except ForecastSolarError as err:
                 update_failed = UpdateFailed(f"Forecast.Solar API error: {err}")
                 self._log_step_error("mpc_publish", update_failed)
+                await self._async_recover_from_publish_failure(str(update_failed))
                 raise update_failed from err
             except UpdateFailed as err:
                 self._log_step_error("mpc_publish", err)
+                await self._async_recover_from_publish_failure(str(err))
                 raise
             except TimeoutError as err:
                 update_failed = UpdateFailed("MPC publish timed out")
                 self._log_step_error("mpc_publish", update_failed)
+                await self._async_recover_from_publish_failure(str(update_failed))
                 raise update_failed from err
             except Exception as err:
                 update_failed = UpdateFailed(f"MPC publish unexpected error: {err}")
                 _LOGGER.exception("[ERR] mpc_publish unexpected exception")
+                await self._async_recover_from_publish_failure(str(update_failed))
                 raise update_failed from err

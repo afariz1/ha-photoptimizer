@@ -41,7 +41,21 @@ DEFAULT_ML_PREDICT_PUBLISH_UNIT = "W"
 DEFAULT_ML_PREDICT_PUBLISH_NAME = "Load Power Forecast custom ML model"
 DEFAULT_ML_PREDICT_READBACK_TIMEOUT_SECONDS = 20
 DEFAULT_ML_PREDICT_READBACK_POLL_SECONDS = 0.5
+DEFAULT_PUBLISH_READBACK_TIMEOUT_SECONDS = 3.0
+DEFAULT_PUBLISH_READBACK_POLL_SECONDS = 0.5
 _SLOT_POWER_THRESHOLD_W = 50.0
+
+
+class EmhassConnectionError(Exception):
+    """Raised when EMHASS is unreachable or returns a server-side error."""
+
+
+class EmhassAuthError(Exception):
+    """Raised when EMHASS rejects the provided credentials."""
+
+
+class EmhassValidationError(Exception):
+    """Raised when EMHASS responds but the endpoint/configuration is invalid."""
 
 
 class EmhassClient:
@@ -205,6 +219,46 @@ class EmhassClient:
             headers["Authorization"] = f"Bearer {self._token}"
         return headers
 
+    @staticmethod
+    async def async_validate_base_url(
+        hass: HomeAssistant,
+        url: str,
+        token: str | None = None,
+    ) -> None:
+        """Validate that EMHASS is reachable and accepts the provided token."""
+        session = async_get_clientsession(hass)
+        endpoint = url.rstrip("/")
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+
+        _LOGGER.debug("Validating EMHASS base URL at %s", endpoint)
+        try:
+            async with session.get(
+                endpoint,
+                headers=headers,
+                timeout=ClientTimeout(total=5),
+            ) as response:
+                status = response.status
+                body = await response.text()
+        except ClientError as err:
+            raise EmhassConnectionError(str(err)) from err
+        except (OSError, RuntimeError, ValueError) as err:
+            raise EmhassConnectionError(str(err)) from err
+
+        if status in (401, 403):
+            raise EmhassAuthError(f"EMHASS rejected credentials with status {status}")
+
+        if status >= 500:
+            raise EmhassConnectionError(
+                f"EMHASS returned server error {status}: {body[:200]}"
+            )
+
+        if status >= 400:
+            raise EmhassValidationError(
+                f"EMHASS returned invalid response {status}: {body[:200]}"
+            )
+
     async def _async_check_url(self, url: str, label: str) -> bool:
         """Lightweight reachability check before hitting EMHASS."""
         _LOGGER.debug("Checking EMHASS reachability for %s at %s", label, url)
@@ -275,7 +329,7 @@ class EmhassClient:
                     data = await response.json()
                     if isinstance(data, dict):
                         _LOGGER.debug("EMHASS %s response keys: %s", action, list(data))
-                        return data
+                        return {"status": response.status, **data}
                     return {"data": data, "status": response.status}
 
                 _LOGGER.debug("EMHASS %s success %s: %s", action, response.status, text)
@@ -565,6 +619,62 @@ class EmhassClient:
                 for key, entity in published_entities.items()
             ),
         )
+
+    def _published_entities_are_fresh(self, request_started_at: datetime) -> bool:
+        """Return True when critical published entities are newer than the request."""
+        for key in ("optim_status", "battery_forecast"):
+            descriptor = self._published_entities.get(key)
+            if descriptor is None:
+                _LOGGER.debug("Freshness check missing descriptor for %s", key)
+                return False
+
+            entity_id = descriptor["entity_id"]
+            state = self._hass.states.get(entity_id)
+            if state is None:
+                _LOGGER.debug("Freshness check missing entity state for %s", entity_id)
+                return False
+
+            last_updated = state.last_updated
+            if last_updated is None or last_updated <= request_started_at:
+                _LOGGER.debug(
+                    "Freshness check failed for %s: last_updated=%s request_started_at=%s",
+                    entity_id,
+                    last_updated,
+                    request_started_at,
+                )
+                return False
+
+        return True
+
+    async def _async_wait_for_fresh_publish_entities(
+        self, request_started_at: datetime
+    ) -> bool:
+        """Poll HA state until critical publish entities are fresh."""
+        deadline = time.monotonic() + DEFAULT_PUBLISH_READBACK_TIMEOUT_SECONDS
+        attempt = 0
+
+        while True:
+            attempt += 1
+            await self._hass.async_block_till_done()
+            if self._published_entities_are_fresh(request_started_at):
+                _LOGGER.debug(
+                    "Publish freshness check passed on attempt %s after request_started_at=%s",
+                    attempt,
+                    request_started_at,
+                )
+                return True
+
+            if time.monotonic() >= deadline:
+                break
+
+            await asyncio.sleep(DEFAULT_PUBLISH_READBACK_POLL_SECONDS)
+
+        _LOGGER.warning(
+            "Publish freshness check failed after %s attempts (timeout=%ss)",
+            attempt,
+            DEFAULT_PUBLISH_READBACK_TIMEOUT_SECONDS,
+        )
+        return False
 
     def _extract_schedule(
         self,
@@ -951,6 +1061,8 @@ class EmhassClient:
             _LOGGER.debug("EMHASS publish-data aborted: base URL unreachable")
             return None
 
+        request_started_at = dt_util.utcnow()
+
         publish_response = await self._async_post_action(
             "publish-data",
             self._build_publish_payload(optimization_time_step_minutes),
@@ -960,7 +1072,21 @@ class EmhassClient:
             _LOGGER.debug("EMHASS publish-data failed: no response")
             return None
 
-        await self._hass.async_block_till_done()
+        publish_status = publish_response.get("status")
+        if isinstance(publish_status, int) and publish_status not in (200, 201):
+            _LOGGER.warning(
+                "EMHASS publish-data returned non-success status=%s, refusing stale publish result",
+                publish_status,
+            )
+            return None
+
+        if not await self._async_wait_for_fresh_publish_entities(request_started_at):
+            _LOGGER.warning(
+                "EMHASS publish-data returned stale entities after request_started_at=%s",
+                request_started_at,
+            )
+            return None
+
         published_entities = self._read_published_entities()
         execution_plan = self._build_execution_plan(
             published_entities,

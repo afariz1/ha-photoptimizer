@@ -55,15 +55,46 @@ from .const import (
     INVERTER_TYPE_GOODWE,
     INVERTER_TYPE_GROWATT,
 )
+from .emhass_client import (
+    EmhassAuthError,
+    EmhassClient,
+    EmhassConnectionError,
+    EmhassValidationError,
+)
 
 _LOGGER = logging.getLogger(__name__)
 _SENSITIVE_FIELDS = {CONF_API_KEY, CONF_EMHASS_TOKEN}
+_EMHASS_VALIDATION_ERRORS = {
+    "connection": "cannot_connect_emhass",
+    "auth": "auth_failed_emhass",
+    "validation": "invalid_emhass",
+}
+
+
+def validate_inverter_step_input(user_input: dict[str, Any]) -> dict[str, str]:
+    """Validate inverter step input and return per-field errors."""
+    errors: dict[str, str] = {}
+
+    if user_input.get(CONF_INVERTER_COMMAND_ONLY, False):
+        return errors
+
+    if not user_input.get(CONF_INVERTER_MODE_ENTITY):
+        errors[CONF_INVERTER_MODE_ENTITY] = "required"
+
+    if not user_input.get(CONF_INVERTER_DISCHARGE_POWER_ENTITY):
+        errors[CONF_INVERTER_DISCHARGE_POWER_ENTITY] = "required"
+
+    if not user_input.get(CONF_INVERTER_CHARGE_POWER_ENTITY):
+        errors[CONF_INVERTER_CHARGE_POWER_ENTITY] = "required"
+
+    return errors
 
 
 def _deferrable_load_defaults(load_index: int) -> dict[str, Any]:
     """Return suggested defaults for one deferrable load."""
     return {
         CONF_DEFERRABLE_LOAD_NAME: f"Load {load_index + 1}",
+        CONF_DEFERRABLE_LOAD_ENTITY: None,
         CONF_DEFERRABLE_LOAD_NOMINAL_POWER: 1000.0,
         CONF_DEFERRABLE_LOAD_OPERATING_MINUTES: 60,
     }
@@ -77,7 +108,10 @@ def _deferrable_load_schema(defaults: dict[str, Any]) -> vol.Schema:
                 CONF_DEFERRABLE_LOAD_NAME,
                 default=defaults[CONF_DEFERRABLE_LOAD_NAME],
             ): str,
-            vol.Required(CONF_DEFERRABLE_LOAD_ENTITY): selector.EntitySelector(
+            vol.Required(
+                CONF_DEFERRABLE_LOAD_ENTITY,
+                default=defaults[CONF_DEFERRABLE_LOAD_ENTITY],
+            ): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain=["switch"], multiple=False)
             ),
             vol.Required(
@@ -98,6 +132,30 @@ def _redact_user_input(user_input: dict[str, Any]) -> dict[str, Any]:
         key: ("***" if key in _SENSITIVE_FIELDS and value else value)
         for key, value in user_input.items()
     }
+
+
+async def _async_validate_emhass_input(
+    hass,
+    user_input: dict[str, Any],
+) -> str | None:
+    """Validate EMHASS input and return a flow error key when needed."""
+    try:
+        await EmhassClient.async_validate_base_url(
+            hass,
+            user_input[CONF_EMHASS_URL],
+            user_input.get(CONF_EMHASS_TOKEN) or None,
+        )
+    except EmhassAuthError as err:
+        _LOGGER.debug("EMHASS auth validation failed: %s", err)
+        return _EMHASS_VALIDATION_ERRORS["auth"]
+    except EmhassValidationError as err:
+        _LOGGER.debug("EMHASS configuration validation failed: %s", err)
+        return _EMHASS_VALIDATION_ERRORS["validation"]
+    except EmhassConnectionError as err:
+        _LOGGER.debug("EMHASS connection validation failed: %s", err)
+        return _EMHASS_VALIDATION_ERRORS["connection"]
+
+    return None
 
 
 class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -125,6 +183,10 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> config_entries.ConfigFlowResult:
         """Initial step, continue directly to required user inputs."""
         _LOGGER.debug("Config flow user step started")
+
+        await self.async_set_unique_id(DOMAIN)
+        self._abort_if_unique_id_configured()
+
         return await self.async_step_electricity_price()
 
     async def async_step_electricity_price(
@@ -174,12 +236,7 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 _redact_user_input(user_input),
             )
             self._data.update(user_input)
-            _LOGGER.debug("PV forecast step validating unique ID")
-
-            unique_id = f"{user_input[CONF_LATITUDE]}_{user_input[CONF_LONGITUDE]}_{user_input[CONF_KWP]}"
-            await self.async_set_unique_id(unique_id)
-            self._abort_if_unique_id_configured()
-            _LOGGER.debug("PV forecast step completed with unique_id=%s", unique_id)
+            _LOGGER.debug("PV forecast step completed under fixed unique_id=%s", DOMAIN)
 
             return await self.async_step_inverter_type()
 
@@ -382,11 +439,7 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "Inverter step received input: %s",
                 _redact_user_input(user_input),
             )
-            if not user_input.get(CONF_INVERTER_COMMAND_ONLY, False):
-                if not user_input.get(CONF_INVERTER_MODE_ENTITY):
-                    errors[CONF_INVERTER_MODE_ENTITY] = "required"
-                if not user_input.get(CONF_INVERTER_DISCHARGE_POWER_ENTITY):
-                    errors[CONF_INVERTER_DISCHARGE_POWER_ENTITY] = "required"
+            errors.update(validate_inverter_step_input(user_input))
 
             if errors:
                 _LOGGER.debug("Inverter step validation errors: %s", errors)
@@ -397,6 +450,20 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         user_input,
                     ),
                     errors=errors,
+                )
+
+            emhass_error = await _async_validate_emhass_input(self.hass, user_input)
+            if emhass_error is not None:
+                _LOGGER.debug(
+                    "EMHASS validation failed in inverter step: %s", emhass_error
+                )
+                return self.async_show_form(
+                    step_id="inverter",
+                    data_schema=self.add_suggested_values_to_schema(
+                        data_schema,
+                        user_input,
+                    ),
+                    errors={"base": emhass_error},
                 )
 
             self._data.update(user_input)
@@ -493,6 +560,31 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "Reconfigure step received input: %s",
                 _redact_user_input(user_input),
             )
+
+            emhass_error = await _async_validate_emhass_input(self.hass, user_input)
+            if emhass_error is not None:
+                _LOGGER.debug(
+                    "EMHASS validation failed in reconfigure step: %s",
+                    emhass_error,
+                )
+                return self.async_show_form(
+                    step_id="reconfigure",
+                    data_schema=self.add_suggested_values_to_schema(
+                        vol.Schema(
+                            {
+                                vol.Required(CONF_EMHASS_URL): str,
+                                vol.Optional(CONF_EMHASS_TOKEN): selector.TextSelector(
+                                    selector.TextSelectorConfig(
+                                        type=selector.TextSelectorType.PASSWORD
+                                    )
+                                ),
+                            }
+                        ),
+                        user_input,
+                    ),
+                    errors={"base": emhass_error},
+                )
+
             return self.async_update_reload_and_abort(
                 entry,
                 data_updates={
@@ -594,6 +686,10 @@ class PhotoptimizerOptionsFlow(config_entries.OptionsFlowWithReload):
             CONF_DEFERRABLE_LOAD_NAME: existing_load.get(
                 CONF_DEFERRABLE_LOAD_NAME,
                 f"Load {self._deferrable_load_index + 1}",
+            ),
+            CONF_DEFERRABLE_LOAD_ENTITY: existing_load.get(
+                CONF_DEFERRABLE_LOAD_ENTITY,
+                None,
             ),
             CONF_DEFERRABLE_LOAD_NOMINAL_POWER: existing_load.get(
                 CONF_DEFERRABLE_LOAD_NOMINAL_POWER,

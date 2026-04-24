@@ -4,6 +4,7 @@
   "version": "0.1.11",
   "codeowners": ["@afariz1"],
   "config_flow": true,
+  "single_config_entry": true,
   "dependencies": ["recorder"],
   "documentation": "https://github.com/opela/ha-photoptimizer#readme",
   "issue_tracker": "https://github.com/opela/ha-photoptimizer/issues",

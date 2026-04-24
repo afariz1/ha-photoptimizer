@@ -24,3 +24,7 @@ class InverterControlAdapter(ABC):
         Raises:
             Any exceptions from async service calls (Home Assistant integration).
         """
+
+    async def async_set_execution_window_minutes(self, minutes: int) -> None:
+        """Store the current execution window length when an adapter needs it."""
+        return None

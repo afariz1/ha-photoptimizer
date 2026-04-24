@@ -6,6 +6,8 @@
     "error": {
       "cannot_connect": "Failed to connect to Forecast.Solar",
       "cannot_connect_emhass": "Failed to connect to EMHASS",
+      "auth_failed_emhass": "EMHASS rejected the provided credentials",
+      "invalid_emhass": "EMHASS returned an invalid response",
       "unknown": "Unexpected error occurred"
     },
     "step": {

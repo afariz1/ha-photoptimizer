@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from forecast_solar import ForecastSolar, ForecastSolarError
@@ -35,6 +36,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _LOGGER.debug(
         "Starting setup for entry_id=%s title=%s", entry.entry_id, entry.title
     )
+
+    scheduled_tasks: set[asyncio.Task[object]] = set()
+
+    def _track_task(task: asyncio.Task[object]) -> asyncio.Task[object]:
+        """Remember a scheduled task so it can be cancelled on unload."""
+        scheduled_tasks.add(task)
+        task.add_done_callback(scheduled_tasks.discard)
+        return task
 
     session = async_get_clientsession(hass)
 
@@ -145,7 +154,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     def _mpc_schedule_listener(_: object) -> None:
         """Schedule one MPC cycle at quarter-hour boundaries."""
         _LOGGER.debug("MPC schedule fired")
-        hass.async_create_task(_async_handle_mpc_cycle())
+        _track_task(hass.async_create_task(_async_handle_mpc_cycle()))
 
     entry.async_on_unload(
         async_track_time_change(
@@ -160,7 +169,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     def _ml_daily_schedule_listener(_: object) -> None:
         """Schedule one ML daily refresh at local 00:05."""
         _LOGGER.debug("ML daily refresh schedule fired")
-        hass.async_create_task(_async_handle_ml_daily_refresh())
+        _track_task(hass.async_create_task(_async_handle_ml_daily_refresh()))
 
     entry.async_on_unload(
         async_track_time_change(
@@ -173,15 +182,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     _LOGGER.debug("Scheduling startup bootstrap task")
-    startup_task = hass.async_create_task(_async_handle_startup())
+    _track_task(hass.async_create_task(_async_handle_startup()))
 
     @callback
-    def _cancel_startup_task() -> None:
-        """Cancel startup task when entry is unloaded."""
-        if not startup_task.done():
-            startup_task.cancel()
+    def _cancel_scheduled_tasks() -> None:
+        """Cancel all outstanding scheduled tasks when entry is unloaded."""
+        for task in tuple(scheduled_tasks):
+            if not task.done():
+                task.cancel()
 
-    entry.async_on_unload(_cancel_startup_task)
+    entry.async_on_unload(_cancel_scheduled_tasks)
 
     _LOGGER.debug("Setup finished for entry_id=%s", entry.entry_id)
     return True

@@ -95,6 +95,10 @@ class PhotoptimizerExecutor:
                 )
                 return False
 
+        await self._controller.async_set_execution_window_minutes(
+            execution_plan.step_minutes
+        )
+
         if not execution_plan.valid and command.op_mode == OperationMode.AUTO:
             signature = (
                 _FALLBACK_SIGNATURE_SLOT_START,

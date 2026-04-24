@@ -40,6 +40,11 @@ class GrowattControlAdapter(InverterControlAdapter):
         self._growatt_variant = growatt_variant
         self._max_charge_power_w = max(1.0, max_charge_power_w)
         self._max_discharge_power_w = max(1.0, max_discharge_power_w)
+        self._execution_window_minutes = 5
+
+    async def async_set_execution_window_minutes(self, minutes: int) -> None:
+        """Store the current execution window length for Growatt timer writes."""
+        self._execution_window_minutes = max(1, int(minutes))
 
     async def async_apply(self, command: ExecutionSlotCommand) -> None:
         """Apply one battery command to Growatt entities/services."""
@@ -81,7 +86,7 @@ class GrowattControlAdapter(InverterControlAdapter):
             return
 
         now = datetime.now().replace(second=0, microsecond=0)
-        end = now + timedelta(minutes=5)
+        end = now + timedelta(minutes=self._execution_window_minutes)
 
         if self._growatt_variant == GROWATT_VARIANT_MIN:
             batt_mode = "load_first"

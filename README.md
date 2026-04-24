@@ -4,9 +4,15 @@ Photoptimizer is a custom Home Assistant integration that optimizes PV and batte
 
 ## What The Integration Does
 
-This integration controls the inverter (now supports GoodWe or Growatt) based on optimization plan. The plan is published by EMHASS which uses load, production and spot prices forecasts.
+This integration controls the inverter (GoodWe or Growatt) based on an optimization plan. The plan is published by EMHASS, which uses load, production and spot price forecasts.
 
 It also exposes multiple sensors for forecasts, optimization status, and battery commands.
+
+## Operating Model
+
+Photoptimizer runs a quarter-hour MPC loop. On each cycle it collects the latest inputs, asks EMHASS for a new plan, publishes the result to Home Assistant, and applies the current slot to the inverter.
+
+There is also a separate daily ML refresh task that keeps the load forecast model aligned with recent history.
 
 ## Requirements
 

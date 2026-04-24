@@ -60,9 +60,12 @@ _LOGGER = logging.getLogger(__name__)
 _PV_BIAS_MIN_FACTOR = 0.6
 _PV_BIAS_MAX_FACTOR = 1.4
 _PV_BIAS_MIN_FORECAST_W = 50.0
-_PV_BIAS_APPLY_BUCKETS = 4
+_PV_BIAS_APPLY_BUCKETS = 12
 _OPTIMIZATION_TIME_STEP_MINUTES = 15
 _ML_BOOTSTRAP_TIMEOUT_SECONDS = 300
+
+
+PVBiasCorrectionInfo = dict[str, float | int | bool | str | None]
 
 
 class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
@@ -181,6 +184,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         self._last_execution_applied: bool | None = None
         self._last_deferrable_loads_applied: bool | None = None
         self._last_valid_battery_soc: float | None = None
+        self._last_pv_forecast_series: dict[str, Any] = {}
         self._optimizer_enabled: bool = True
         self._ml_bootstrap_completed: bool = False
         self._ml_fit_completed: bool = False
@@ -509,12 +513,16 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         self,
         optimization_inputs: OptimizationInputs,
         raw_pv: Any | None,
+        pv_series: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Compose coordinator payload shared by all entities."""
         published_entities = {
             key: entity.as_dict()
             for key, entity in self._last_published_entities.items()
         }
+
+        if pv_series is None:
+            pv_series = self._last_pv_forecast_series
 
         return {
             "timeline": [bucket.as_dict() for bucket in optimization_inputs.timeline],
@@ -528,6 +536,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                 ],
             },
             "raw": {"forecast_solar": raw_pv},
+            "pv_forecast_series": pv_series,
             "emhass": {
                 "runtimeparams": self._last_runtimeparams,
                 "optimization_response": self._last_optimization_response,
@@ -577,7 +586,64 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
             },
         }
 
-    async def _async_collect_inputs(self) -> tuple[OptimizationInputs, Any | None]:
+    def _build_pv_power_series(
+        self,
+        buckets: list[OptimizationBucket],
+        values_kwh: list[float],
+    ) -> list[dict[str, Any]]:
+        """Convert per-bucket PV energy values to chart-friendly power points."""
+        if not buckets or not values_kwh:
+            return []
+
+        bucket_hours = self._bucket_hours(buckets)
+        if bucket_hours <= 0:
+            return []
+
+        series: list[dict[str, Any]] = []
+        for bucket, pv_kwh in zip(buckets, values_kwh, strict=False):
+            power_w = max(0.0, (pv_kwh / bucket_hours) * 1000.0)
+            series.append(
+                {
+                    "date": dt_util.as_utc(bucket.start).isoformat(),
+                    "power_w": round(power_w, 2),
+                }
+            )
+
+        return series
+
+    def _build_pv_forecast_series_payload(
+        self,
+        buckets: list[OptimizationBucket],
+        uncorrected_kwh: list[float],
+        correction: PVBiasCorrectionInfo,
+    ) -> dict[str, Any]:
+        """Build all PV forecast variants for dashboard/chart usage."""
+        corrected_kwh = [bucket.pv for bucket in buckets]
+        factor = float(correction.get("factor") or 1.0)
+        scaled_full_horizon_kwh = [
+            max(0.0, value * factor) for value in uncorrected_kwh
+        ]
+
+        return {
+            "metadata": {
+                "factor": round(factor, 4),
+                "applied": bool(correction.get("applied", False)),
+                "affected_buckets": int(correction.get("affected_buckets", 0) or 0),
+                "source_entity": correction.get("source_entity"),
+                "actual_power_w": correction.get("actual_power_w"),
+                "forecast_power_w": correction.get("forecast_power_w"),
+                "reason": correction.get("reason"),
+            },
+            "uncorrected": self._build_pv_power_series(buckets, uncorrected_kwh),
+            "corrected": self._build_pv_power_series(buckets, corrected_kwh),
+            "full_horizon_scaled": self._build_pv_power_series(
+                buckets, scaled_full_horizon_kwh
+            ),
+        }
+
+    async def _async_collect_inputs(
+        self,
+    ) -> tuple[OptimizationInputs, Any | None, dict[str, Any]]:
         """Collect timeline and plant inputs needed for EMHASS calls."""
         timeline: list[OptimizationBucket] = []
         tz_name = self.entry.data.get(CONF_TIMEZONE) or self.hass.config.time_zone
@@ -645,7 +711,20 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         _LOGGER.debug("Using Forecast.Solar client for PV forecast")
         raw_pv = await self.client.estimate()
         await self._hourly_from_forecast_solar(timeline, raw_pv)
-        await self._apply_current_solar_bias_correction(timeline)
+        uncorrected_pv_kwh = [bucket.pv for bucket in timeline]
+        correction_info = await self._apply_current_solar_bias_correction(timeline)
+        pv_series = self._build_pv_forecast_series_payload(
+            timeline,
+            uncorrected_pv_kwh,
+            correction_info,
+        )
+        _LOGGER.info("PV forecast info metadata=%s", pv_series.get("metadata"))
+        _LOGGER.info("PV forecast info uncorrected=%s", pv_series.get("uncorrected"))
+        _LOGGER.info("PV forecast info corrected=%s", pv_series.get("corrected"))
+        _LOGGER.info(
+            "PV forecast info full_horizon_scaled=%s",
+            pv_series.get("full_horizon_scaled"),
+        )
 
         load_entity = self.entry.data.get(CONF_CURRENT_CONSUMPTION_ENTITY)
         if load_entity:
@@ -676,6 +755,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                 raw_forecast_solar=raw_pv,
             ),
             raw_pv,
+            pv_series,
         )
 
     async def _detect_price_horizon_hours(
@@ -798,22 +878,37 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
     async def _apply_current_solar_bias_correction(
         self,
         buckets: list[OptimizationBucket],
-    ) -> None:
+    ) -> PVBiasCorrectionInfo:
         """Adjust near-term PV forecast from current measured production."""
+        default_result: PVBiasCorrectionInfo = {
+            "applied": False,
+            "factor": 1.0,
+            "affected_buckets": 0,
+            "source_entity": None,
+            "actual_power_w": None,
+            "forecast_power_w": None,
+            "reason": None,
+        }
+
         if not buckets:
-            return
+            default_result["reason"] = "empty_timeline"
+            return default_result
 
         entity_id = self.entry.data.get(CONF_CURRENT_SOLAR_PRODUCTION_ENTITY)
         if not entity_id:
             _LOGGER.debug("Skipping PV bias correction: no current solar entity")
-            return
+            default_result["reason"] = "missing_entity"
+            return default_result
+
+        default_result["source_entity"] = entity_id
 
         state = await self._async_get_state_with_startup_wait(entity_id)
         if state is None:
             _LOGGER.debug(
                 "Skipping PV bias correction: entity %s unavailable", entity_id
             )
-            return
+            default_result["reason"] = "entity_unavailable"
+            return default_result
 
         actual_power_w = self._normalize_power_w(state)
         if actual_power_w is None:
@@ -822,31 +917,43 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                 entity_id,
                 state.state,
             )
-            return
+            default_result["reason"] = "invalid_actual_power"
+            return default_result
+
+        default_result["actual_power_w"] = round(actual_power_w, 2)
 
         bucket_hours = self._bucket_hours(buckets)
         if bucket_hours <= 0:
             _LOGGER.debug(
                 "Skipping PV bias correction: invalid bucket_hours=%s", bucket_hours
             )
-            return
+            default_result["reason"] = "invalid_bucket_hours"
+            return default_result
 
         forecast_power_w = max((buckets[0].pv / bucket_hours) * 1000.0, 0.0)
+        default_result["forecast_power_w"] = round(forecast_power_w, 2)
         if forecast_power_w < _PV_BIAS_MIN_FORECAST_W:
             _LOGGER.debug(
                 "Skipping PV bias correction: forecast %.2f W too small",
                 forecast_power_w,
             )
-            return
+            default_result["reason"] = "forecast_too_small"
+            return default_result
 
         raw_factor = max(actual_power_w, 0.0) / forecast_power_w
         factor = min(max(raw_factor, _PV_BIAS_MIN_FACTOR), _PV_BIAS_MAX_FACTOR)
+        default_result["factor"] = round(factor, 4)
         if abs(factor - 1.0) < 0.01:
-            return
+            default_result["reason"] = "factor_close_to_one"
+            return default_result
 
         affected = min(_PV_BIAS_APPLY_BUCKETS, len(buckets))
         for index in range(affected):
             buckets[index].pv = max(0.0, buckets[index].pv * factor)
+
+        default_result["applied"] = True
+        default_result["affected_buckets"] = affected
+        default_result["reason"] = "applied"
 
         _LOGGER.debug(
             "Applied PV bias correction from %s: actual=%.2fW forecast=%.2fW factor=%.3f affected_buckets=%s",
@@ -856,6 +963,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
             factor,
             affected,
         )
+        return default_result
 
     async def _hourly_from_load_profile(
         self, buckets: list[OptimizationBucket], profile: list[float]
@@ -1175,12 +1283,17 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         try:
             _LOGGER.debug("Coordinator refresh started")
             async with asyncio.timeout(30):
-                optimization_inputs, raw_pv = await self._async_collect_inputs()
+                (
+                    optimization_inputs,
+                    raw_pv,
+                    pv_series,
+                ) = await self._async_collect_inputs()
                 self._last_inputs_snapshot = optimization_inputs
                 self._last_raw_pv_snapshot = raw_pv
+                self._last_pv_forecast_series = pv_series
                 if _LOGGER.isEnabledFor(logging.DEBUG):
                     self._log_timeline(optimization_inputs.timeline)
-                result = self._build_result(optimization_inputs, raw_pv)
+                result = self._build_result(optimization_inputs, raw_pv, pv_series)
                 _LOGGER.debug(
                     "Coordinator refresh finished: horizon=%s step=%s",
                     optimization_inputs.prediction_horizon,
@@ -1200,9 +1313,14 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                 return
             try:
                 async with asyncio.timeout(90):
-                    optimization_inputs, raw_pv = await self._async_collect_inputs()
+                    (
+                        optimization_inputs,
+                        raw_pv,
+                        pv_series,
+                    ) = await self._async_collect_inputs()
                     self._last_inputs_snapshot = optimization_inputs
                     self._last_raw_pv_snapshot = raw_pv
+                    self._last_pv_forecast_series = pv_series
                     optimization_result = (
                         await self.emhass.async_run_naive_optimization(
                             optimization_inputs
@@ -1221,7 +1339,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                         self._log_timeline(optimization_inputs.timeline)
 
                     self.async_set_updated_data(
-                        self._build_result(optimization_inputs, raw_pv)
+                        self._build_result(optimization_inputs, raw_pv, pv_series)
                     )
                     self._log_step_ok(
                         "mpc_optimization",

@@ -629,8 +629,9 @@ class EmhassClient:
         )
 
     def _published_entities_are_fresh(self, request_started_at: datetime) -> bool:
-        """Return True when at least one relevant published entity is available."""
+        """Return True when at least one relevant published entity updates after publish."""
         ready_keys: list[str] = []
+        fresh_keys: list[str] = []
 
         for key in _PUBLISH_READBACK_RELEVANT_KEYS:
             descriptor = self._published_entities.get(key)
@@ -647,17 +648,23 @@ class EmhassClient:
 
             ready_keys.append(key)
 
-        if ready_keys:
+            last_updated = getattr(state, "last_updated", None)
+            if last_updated is not None and last_updated > request_started_at:
+                fresh_keys.append(key)
+
+        if fresh_keys:
             _LOGGER.debug(
-                "Publish readback check passed with ready_keys=%s request_started_at=%s",
+                "Publish readback check passed with fresh_keys=%s ready_keys=%s request_started_at=%s",
+                fresh_keys,
                 ready_keys,
                 request_started_at,
             )
             return True
 
         _LOGGER.debug(
-            "Publish readback check found no readable relevant entities request_started_at=%s relevant_keys=%s",
+            "Publish readback check found no fresh relevant entities request_started_at=%s ready_keys=%s relevant_keys=%s",
             request_started_at,
+            ready_keys,
             _PUBLISH_READBACK_RELEVANT_KEYS,
         )
         return False

@@ -699,10 +699,8 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
 
         if price_entity:
             _LOGGER.debug("Using electricity price entity: %s", price_entity)
-            mapped_price_hours = await self._hourly_from_price_entity(
-                price_entity, timeline
-            )
-            if mapped_price_hours <= 0:
+            mapped_price_buckets = await self._price_from_entity(price_entity, timeline)
+            if mapped_price_buckets <= 0:
                 self._raise_update_failed(
                     f"Price entity {price_entity} contains no usable price points"
                 )
@@ -796,7 +794,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
 
         return contiguous_hours
 
-    async def _hourly_from_price_entity(
+    async def _price_from_entity(
         self, entity_id: str, buckets: list[OptimizationBucket]
     ) -> int:
         state = await self._async_get_state_with_startup_wait(entity_id)
@@ -807,10 +805,13 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         tz_name = self.entry.data.get(CONF_TIMEZONE) or self.hass.config.time_zone
         tz = dt_util.get_time_zone(tz_name) or dt_util.UTC
 
+        exact_bucket_index: dict[datetime, list[OptimizationBucket]] = {}
         hour_bucket_index: dict[datetime, list[OptimizationBucket]] = {}
         for bucket in buckets:
+            exact_bucket_index.setdefault(bucket.start, []).append(bucket)
             hour_start = bucket.start.replace(minute=0, second=0, microsecond=0)
             hour_bucket_index.setdefault(hour_start, []).append(bucket)
+        mapped_buckets: set[datetime] = set()
         mapped_hours: set[datetime] = set()
 
         for key, value in state.attributes.items():
@@ -823,19 +824,24 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                 continue
 
             dt_local = dt_util.as_local(dt).astimezone(tz)
+            exact_start = dt_local.replace(second=0, microsecond=0)
             hour_start = dt_local.replace(minute=0, second=0, microsecond=0)
-            target_buckets = hour_bucket_index.get(hour_start)
+            target_buckets = exact_bucket_index.get(exact_start)
+            if not target_buckets:
+                target_buckets = hour_bucket_index.get(hour_start)
             if target_buckets:
                 for bucket in target_buckets:
                     bucket.price = numeric
+                    mapped_buckets.add(bucket.start)
                 mapped_hours.add(hour_start)
 
         _LOGGER.debug(
-            "Price timeline populated from %s: mapped_hours=%s",
+            "Price timeline populated from %s: mapped_hours=%s mapped_buckets=%s",
             entity_id,
             len(mapped_hours),
+            len(mapped_buckets),
         )
-        return len(mapped_hours)
+        return len(mapped_buckets)
 
     async def _hourly_from_forecast_solar(
         self, buckets: list[OptimizationBucket], raw_pv

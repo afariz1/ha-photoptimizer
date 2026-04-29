@@ -3,3 +3,7 @@ upravy.md
 __pycache__/
 *.pyc
 .vscode/
+*.csv
+*.txt
+*.log
+scripts/extract_pv_correction_eval.py

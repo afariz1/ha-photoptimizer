@@ -63,6 +63,7 @@ _PV_BIAS_MIN_FORECAST_W = 50.0
 _PV_BIAS_APPLY_BUCKETS = 12
 _OPTIMIZATION_TIME_STEP_MINUTES = 15
 _ML_BOOTSTRAP_TIMEOUT_SECONDS = 300
+_LOAD_PROFILE_HISTORY_WINDOW_DAYS = 2
 
 
 PVBiasCorrectionInfo = dict[str, float | int | bool | str | None]
@@ -1026,31 +1027,101 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
             second=0, microsecond=0
         )
         values_by_slot_utc: dict[datetime, float] = {}
-        for row in forecasts:
-            if not isinstance(row, dict):
-                continue
+        timestamp_keys = ("date", "datetime", "time", "start", "timestamp", "ts")
+        value_keys = (
+            "p_load_forecast",
+            "load_power_forecast",
+            "value",
+            "state",
+            "forecast",
+            "load",
+            "power",
+        )
 
-            parsed = dt_util.parse_datetime(str(row.get("date")))
+        def _parse_row_timestamp(candidate: object) -> datetime | None:
+            if isinstance(candidate, datetime):
+                return dt_util.as_utc(candidate)
+
+            parsed = dt_util.parse_datetime(str(candidate))
             if parsed is None:
+                return None
+
+            return dt_util.as_utc(parsed)
+
+        def _extract_row_numeric(candidate: object) -> float | None:
+            numeric = self._coerce_float(candidate)
+            if numeric is not None:
+                return numeric
+
+            if isinstance(candidate, dict):
+                for key in value_keys:
+                    numeric = self._coerce_float(candidate.get(key))
+                    if numeric is not None:
+                        return numeric
+
+                for key, value in candidate.items():
+                    if key in timestamp_keys:
+                        continue
+                    numeric = _extract_row_numeric(value)
+                    if numeric is not None:
+                        return numeric
+
+            if isinstance(candidate, (list, tuple)):
+                for item in candidate:
+                    numeric = _extract_row_numeric(item)
+                    if numeric is not None:
+                        return numeric
+
+            return None
+
+        for row in forecasts:
+            parsed: datetime | None = None
+            numeric: float | None = None
+
+            if isinstance(row, dict):
+                for key in timestamp_keys:
+                    parsed = _parse_row_timestamp(row.get(key))
+                    if parsed is not None:
+                        break
+
+                if parsed is None:
+                    for key, value in row.items():
+                        parsed = _parse_row_timestamp(key)
+                        if parsed is not None:
+                            numeric = _extract_row_numeric(value)
+                            break
+
+                if numeric is None:
+                    for key in value_keys:
+                        numeric = _extract_row_numeric(row.get(key))
+                        if numeric is not None:
+                            break
+
+                if numeric is None:
+                    for key, value in row.items():
+                        if key in timestamp_keys:
+                            continue
+                        numeric = _extract_row_numeric(value)
+                        if numeric is not None:
+                            break
+
+            elif isinstance(row, (list, tuple)) and len(row) >= 2:
+                parsed = _parse_row_timestamp(row[0])
+                numeric = _extract_row_numeric(row[1])
+
+                if parsed is None and len(row) > 2:
+                    for item in row:
+                        if parsed is None:
+                            parsed = _parse_row_timestamp(item)
+                        if numeric is None:
+                            numeric = _extract_row_numeric(item)
+
+            if parsed is None or numeric is None:
                 continue
 
-            slot_utc = dt_util.as_utc(parsed).replace(second=0, microsecond=0)
+            slot_utc = parsed.replace(second=0, microsecond=0)
             if slot_utc < first_bucket_utc:
                 continue
-
-            numeric: float | None = None
-            for key in ("p_load_forecast", "value", "state"):
-                numeric = self._coerce_float(row.get(key))
-                if numeric is not None:
-                    break
-
-            if numeric is None:
-                for row_key, row_value in row.items():
-                    if row_key == "date":
-                        continue
-                    numeric = self._coerce_float(row_value)
-                    if numeric is not None:
-                        break
 
             if numeric is not None:
                 values_by_slot_utc[slot_utc] = numeric
@@ -1061,6 +1132,14 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
             len(values_by_slot_utc),
             first_bucket_utc.isoformat(),
         )
+
+        if not values_by_slot_utc and forecasts:
+            _LOGGER.debug(
+                "Published ML forecast parse yielded no points for %s: first_row_type=%s first_row_sample=%s",
+                entity_id,
+                type(forecasts[0]).__name__,
+                forecasts[0],
+            )
 
         if len(values_by_slot_utc) < len(buckets):
             _LOGGER.debug(
@@ -1215,7 +1294,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
             _LOGGER.debug("Using default load profile (no entity configured)")
             return default_profile
 
-        start = dt_util.utcnow() - timedelta(days=7)
+        start = dt_util.utcnow() - timedelta(days=_LOAD_PROFILE_HISTORY_WINDOW_DAYS)
         history_profile = await self._build_load_profile_from_state_history(
             entity_id,
             start,
@@ -1225,8 +1304,9 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
             return history_profile
 
         _LOGGER.debug(
-            "No usable state history found for %s, using default load profile",
+            "No usable state history found for %s in the last %s days, using default load profile",
             entity_id,
+            _LOAD_PROFILE_HISTORY_WINDOW_DAYS,
         )
         return default_profile
 

@@ -621,7 +621,7 @@ class EmhassClient:
         )
 
     def _published_entities_are_fresh(self, request_started_at: datetime) -> bool:
-        """Return True when critical published entities are newer than the request."""
+        """Return True when critical published entities are available after publish."""
         for key in ("optim_status", "battery_forecast"):
             descriptor = self._published_entities.get(key)
             if descriptor is None:
@@ -634,12 +634,11 @@ class EmhassClient:
                 _LOGGER.debug("Freshness check missing entity state for %s", entity_id)
                 return False
 
-            last_updated = state.last_updated
-            if last_updated is None or last_updated <= request_started_at:
+            if state.state in (None, "", "unknown", "unavailable"):
                 _LOGGER.debug(
-                    "Freshness check failed for %s: last_updated=%s request_started_at=%s",
+                    "Publish readback check failed for %s: state=%s request_started_at=%s",
                     entity_id,
-                    last_updated,
+                    state.state,
                     request_started_at,
                 )
                 return False
@@ -658,7 +657,7 @@ class EmhassClient:
             await self._hass.async_block_till_done()
             if self._published_entities_are_fresh(request_started_at):
                 _LOGGER.debug(
-                    "Publish freshness check passed on attempt %s after request_started_at=%s",
+                    "Publish readback check passed on attempt %s after request_started_at=%s",
                     attempt,
                     request_started_at,
                 )
@@ -670,7 +669,7 @@ class EmhassClient:
             await asyncio.sleep(DEFAULT_PUBLISH_READBACK_POLL_SECONDS)
 
         _LOGGER.warning(
-            "Publish freshness check failed after %s attempts (timeout=%ss)",
+            "Publish readback check failed after %s attempts (timeout=%ss)",
             attempt,
             DEFAULT_PUBLISH_READBACK_TIMEOUT_SECONDS,
         )
@@ -1028,7 +1027,7 @@ class EmhassClient:
         response = await self._async_post_action(
             "forecast-model-predict",
             payload,
-            timeout=60,
+            timeout=240,
         )
         if response is None:
             _LOGGER.debug("EMHASS forecast-model-predict failed: no response")

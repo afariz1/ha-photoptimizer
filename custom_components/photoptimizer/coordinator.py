@@ -813,6 +813,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
             hour_bucket_index.setdefault(hour_start, []).append(bucket)
         mapped_buckets: set[datetime] = set()
         mapped_hours: set[datetime] = set()
+        points_by_hour: dict[datetime, dict[datetime, float]] = {}
 
         for key, value in state.attributes.items():
             numeric = self._coerce_float(value)
@@ -826,14 +827,35 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
             dt_local = dt_util.as_local(dt).astimezone(tz)
             exact_start = dt_local.replace(second=0, microsecond=0)
             hour_start = dt_local.replace(minute=0, second=0, microsecond=0)
-            target_buckets = exact_bucket_index.get(exact_start)
+            points_by_hour.setdefault(hour_start, {})[exact_start] = numeric
+
+        for hour_start, points in points_by_hour.items():
+            # If we have sub-hour points for an hour, use exact timestamps only.
+            # If all points are exactly at HH:00, treat the value as hourly
+            # and propagate it across all optimization buckets in that hour.
+            has_subhour_points = any(
+                point.minute != 0 or point.second != 0 or point.microsecond != 0
+                for point in points
+            )
+            if has_subhour_points:
+                for exact_start, numeric in points.items():
+                    target_buckets = exact_bucket_index.get(exact_start)
+                    if not target_buckets:
+                        continue
+                    for bucket in target_buckets:
+                        bucket.price = numeric
+                        mapped_buckets.add(bucket.start)
+                    mapped_hours.add(hour_start)
+                continue
+
+            target_buckets = hour_bucket_index.get(hour_start)
             if not target_buckets:
-                target_buckets = hour_bucket_index.get(hour_start)
-            if target_buckets:
-                for bucket in target_buckets:
-                    bucket.price = numeric
-                    mapped_buckets.add(bucket.start)
-                mapped_hours.add(hour_start)
+                continue
+            numeric = next(iter(points.values()))
+            for bucket in target_buckets:
+                bucket.price = numeric
+                mapped_buckets.add(bucket.start)
+            mapped_hours.add(hour_start)
 
         _LOGGER.debug(
             "Price timeline populated from %s: mapped_hours=%s mapped_buckets=%s",

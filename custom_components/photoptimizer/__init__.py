@@ -8,8 +8,8 @@ import logging
 from forecast_solar import ForecastSolar, ForecastSolarError
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, Platform
+from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_time_change
@@ -22,7 +22,6 @@ _LOGGER = logging.getLogger(__name__)
 
 _PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SWITCH]
 _MPC_QUARTER_MINUTES = [0, 15, 30, 45]
-_STARTUP_BOOTSTRAP_DELAY_SECONDS = 30
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -145,12 +144,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def _async_handle_startup() -> None:
         """Run startup sequence: ML bootstrap only."""
         _LOGGER.debug("Startup started")
-        _LOGGER.debug(
-            "Delaying startup ML bootstrap by %ss to allow HA services to initialize",
-            _STARTUP_BOOTSTRAP_DELAY_SECONDS,
-        )
         try:
-            await asyncio.sleep(_STARTUP_BOOTSTRAP_DELAY_SECONDS)
             await coordinator.async_run_startup_ml_bootstrap()
         except Exception as err:
             _LOGGER.warning("Startup ML bootstrap failed: %s", err)
@@ -187,8 +181,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
     )
 
-    _LOGGER.debug("Scheduling startup bootstrap task")
-    _track_task(hass.async_create_task(_async_handle_startup()))
+    @callback
+    def _run_startup_bootstrap(_: Event | None = None) -> None:
+        """Schedule startup ML bootstrap when Home Assistant is ready."""
+        _LOGGER.debug("Scheduling startup bootstrap task")
+        _track_task(hass.async_create_task(_async_handle_startup()))
+
+    if hass.is_running:
+        _run_startup_bootstrap()
+    else:
+        _LOGGER.debug("Deferring startup bootstrap until Home Assistant started")
+        entry.async_on_unload(
+            hass.bus.async_listen_once(
+                EVENT_HOMEASSISTANT_STARTED,
+                _run_startup_bootstrap,
+            )
+        )
 
     @callback
     def _cancel_scheduled_tasks() -> None:

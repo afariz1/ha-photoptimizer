@@ -41,9 +41,17 @@ DEFAULT_ML_PREDICT_PUBLISH_UNIT = "W"
 DEFAULT_ML_PREDICT_PUBLISH_NAME = "Load Power Forecast custom ML model"
 DEFAULT_ML_PREDICT_READBACK_TIMEOUT_SECONDS = 20
 DEFAULT_ML_PREDICT_READBACK_POLL_SECONDS = 0.5
-DEFAULT_PUBLISH_READBACK_TIMEOUT_SECONDS = 3.0
+DEFAULT_PUBLISH_READBACK_TIMEOUT_SECONDS = 10.0
 DEFAULT_PUBLISH_READBACK_POLL_SECONDS = 0.5
 _SLOT_POWER_THRESHOLD_W = 50.0
+_PUBLISH_READBACK_RELEVANT_KEYS = (
+    "optim_status",
+    "battery_forecast",
+    "grid_forecast",
+    "cost_fun",
+    "pv_forecast",
+    "load_forecast",
+)
 
 
 class EmhassConnectionError(Exception):
@@ -621,29 +629,38 @@ class EmhassClient:
         )
 
     def _published_entities_are_fresh(self, request_started_at: datetime) -> bool:
-        """Return True when critical published entities are available after publish."""
-        for key in ("optim_status", "battery_forecast"):
+        """Return True when at least one relevant published entity is available."""
+        ready_keys: list[str] = []
+
+        for key in _PUBLISH_READBACK_RELEVANT_KEYS:
             descriptor = self._published_entities.get(key)
             if descriptor is None:
-                _LOGGER.debug("Freshness check missing descriptor for %s", key)
-                return False
+                continue
 
             entity_id = descriptor["entity_id"]
             state = self._hass.states.get(entity_id)
             if state is None:
-                _LOGGER.debug("Freshness check missing entity state for %s", entity_id)
-                return False
+                continue
 
             if state.state in (None, "", "unknown", "unavailable"):
-                _LOGGER.debug(
-                    "Publish readback check failed for %s: state=%s request_started_at=%s",
-                    entity_id,
-                    state.state,
-                    request_started_at,
-                )
-                return False
+                continue
 
-        return True
+            ready_keys.append(key)
+
+        if ready_keys:
+            _LOGGER.debug(
+                "Publish readback check passed with ready_keys=%s request_started_at=%s",
+                ready_keys,
+                request_started_at,
+            )
+            return True
+
+        _LOGGER.debug(
+            "Publish readback check found no readable relevant entities request_started_at=%s relevant_keys=%s",
+            request_started_at,
+            _PUBLISH_READBACK_RELEVANT_KEYS,
+        )
+        return False
 
     async def _async_wait_for_fresh_publish_entities(
         self, request_started_at: datetime

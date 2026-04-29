@@ -22,6 +22,7 @@ _LOGGER = logging.getLogger(__name__)
 
 _PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SWITCH]
 _MPC_QUARTER_MINUTES = [0, 15, 30, 45]
+_STARTUP_BOOTSTRAP_DELAY_SECONDS = 30
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -144,7 +145,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def _async_handle_startup() -> None:
         """Run startup sequence: ML bootstrap only."""
         _LOGGER.debug("Startup started")
+        _LOGGER.debug(
+            "Delaying startup ML bootstrap by %ss to allow HA services to initialize",
+            _STARTUP_BOOTSTRAP_DELAY_SECONDS,
+        )
         try:
+            await asyncio.sleep(_STARTUP_BOOTSTRAP_DELAY_SECONDS)
             await coordinator.async_run_startup_ml_bootstrap()
         except Exception as err:
             _LOGGER.warning("Startup ML bootstrap failed: %s", err)

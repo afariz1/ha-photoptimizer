@@ -63,6 +63,8 @@ _PV_BIAS_MIN_FORECAST_W = 50.0
 _PV_BIAS_APPLY_BUCKETS = 12
 _OPTIMIZATION_TIME_STEP_MINUTES = 15
 _ML_BOOTSTRAP_TIMEOUT_SECONDS = 300
+_ML_BOOTSTRAP_MAX_ATTEMPTS = 3
+_ML_BOOTSTRAP_RETRY_DELAY_SECONDS = 30
 _LOAD_PROFILE_HISTORY_WINDOW_DAYS = 2
 
 
@@ -378,41 +380,63 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
 
         try:
             self._log_step_start("startup_ml_bootstrap", load_entity)
-            try:
-                async with asyncio.timeout(_ML_BOOTSTRAP_TIMEOUT_SECONDS):
-                    fitted = await self.ml_forecast.async_train_model(
-                        load_entity,
-                        force=True,
-                        optimization_time_step_minutes=_OPTIMIZATION_TIME_STEP_MINUTES,
-                    )
-                    if not fitted:
-                        self._log_step_ok("startup_ml_bootstrap", "fit failed")
-                        return
+            last_error: Exception | None = None
+            for attempt in range(1, _ML_BOOTSTRAP_MAX_ATTEMPTS + 1):
+                try:
+                    async with asyncio.timeout(_ML_BOOTSTRAP_TIMEOUT_SECONDS):
+                        fitted = await self.ml_forecast.async_train_model(
+                            load_entity,
+                            force=True,
+                            optimization_time_step_minutes=_OPTIMIZATION_TIME_STEP_MINUTES,
+                        )
+                        if not fitted:
+                            raise RuntimeError("fit failed")
 
-                    self._ml_fit_completed = True
-                    prediction_horizon = (
-                        DEFAULT_HORIZON_HOURS * 60
-                    ) // _OPTIMIZATION_TIME_STEP_MINUTES
-                    predicted = await self.ml_forecast.async_predict_load(
-                        load_entity,
-                        prediction_horizon,
-                        _OPTIMIZATION_TIME_STEP_MINUTES,
-                    )
-                    if predicted is None:
-                        self._log_step_ok("startup_ml_bootstrap", "predict failed")
-                        return
+                        self._ml_fit_completed = True
+                        prediction_horizon = (
+                            DEFAULT_HORIZON_HOURS * 60
+                        ) // _OPTIMIZATION_TIME_STEP_MINUTES
+                        predicted = await self.ml_forecast.async_predict_load(
+                            load_entity,
+                            prediction_horizon,
+                            _OPTIMIZATION_TIME_STEP_MINUTES,
+                        )
+                        if predicted is None:
+                            raise RuntimeError("predict failed")
 
+                        self._log_step_ok(
+                            "startup_ml_bootstrap",
+                            f"fit+predict finished points={len(predicted)} on attempt {attempt}/{_ML_BOOTSTRAP_MAX_ATTEMPTS}",
+                        )
+                        return
+                except TimeoutError as err:
+                    last_error = err
+                    failure_reason = (
+                        f"timeout after {_ML_BOOTSTRAP_TIMEOUT_SECONDS}s "
+                        f"(attempt {attempt}/{_ML_BOOTSTRAP_MAX_ATTEMPTS})"
+                    )
+                except Exception as err:
+                    last_error = err
+                    failure_reason = (
+                        f"{err} (attempt {attempt}/{_ML_BOOTSTRAP_MAX_ATTEMPTS})"
+                    )
+
+                if attempt < _ML_BOOTSTRAP_MAX_ATTEMPTS:
+                    _LOGGER.warning(
+                        "Startup ML bootstrap failed: %s; retrying in %ss",
+                        failure_reason,
+                        _ML_BOOTSTRAP_RETRY_DELAY_SECONDS,
+                    )
+                    await asyncio.sleep(_ML_BOOTSTRAP_RETRY_DELAY_SECONDS)
+                    continue
+
+                if last_error is not None:
+                    self._log_step_error("startup_ml_bootstrap", last_error)
+                else:
                     self._log_step_ok(
                         "startup_ml_bootstrap",
-                        f"fit+predict finished points={len(predicted)}",
+                        "failed after maximum retry attempts",
                     )
-            except TimeoutError:
-                self._log_step_ok(
-                    "startup_ml_bootstrap",
-                    f"timeout after {_ML_BOOTSTRAP_TIMEOUT_SECONDS}s",
-                )
-            except Exception as err:
-                self._log_step_error("startup_ml_bootstrap", err)
         finally:
             self._ml_bootstrap_completed = True
             self._operation_lock.release()

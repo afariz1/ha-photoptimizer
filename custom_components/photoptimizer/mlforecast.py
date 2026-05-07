@@ -11,7 +11,7 @@ import logging
 from numbers import Real
 from typing import TYPE_CHECKING
 
-from homeassistant.components.recorder import get_instance, history
+from homeassistant.components.recorder import get_instance, history, statistics
 from homeassistant.util import dt as dt_util
 
 if TYPE_CHECKING:
@@ -97,14 +97,61 @@ class MLForecastService:
         )
         return len(slots_with_data)
 
+    async def _count_valid_statistics_slots(
+        self, statistic_id: str, start: datetime
+    ) -> int:
+        """Return estimated number of valid 15-minute slots from long-term statistics."""
+        try:
+            result = await get_instance(self.hass).async_add_executor_job(
+                partial(
+                    statistics.statistics_during_period,
+                    self.hass,
+                    start,
+                    None,
+                    {statistic_id},
+                    "hour",
+                    None,
+                    {"mean", "state"},
+                )
+            )
+        except (RuntimeError, OSError, ValueError) as err:
+            _LOGGER.debug("Statistics slot query failed for %s: %s", statistic_id, err)
+            return 0
+
+        rows = result.get(statistic_id, [])
+        valid_hours = 0
+        for row in rows:
+            mean_value = row.get("mean") if isinstance(row, dict) else getattr(row, "mean", None)
+            state_value = row.get("state") if isinstance(row, dict) else getattr(row, "state", None)
+            if self._coerce_float(mean_value) is None and self._coerce_float(state_value) is None:
+                continue
+            valid_hours += 1
+
+        slots_per_hour = max(1, 60 // _ML_SLOT_MINUTES)
+        estimated_slots = valid_hours * slots_per_hour
+        _LOGGER.debug(
+            "ML statistics history query for %s: rows=%s valid_hours=%s estimated_slots=%s",
+            statistic_id,
+            len(rows),
+            valid_hours,
+            estimated_slots,
+        )
+        return estimated_slots
+
     async def async_has_sufficient_history(self, entity_id: str) -> bool:
         """Check if entity has enough historical data for ML model training."""
         start = dt_util.utcnow() - timedelta(days=_HISTORY_WINDOW_DAYS_FOR_ML)
-        valid_rows = await self._count_valid_state_history_slots(entity_id, start)
+        valid_state_rows = await self._count_valid_state_history_slots(entity_id, start)
+        valid_rows = valid_state_rows
+        if valid_rows < _MIN_HISTORY_ROWS_FOR_ML:
+            statistics_slots = await self._count_valid_statistics_slots(entity_id, start)
+            valid_rows = max(valid_rows, statistics_slots)
+
         is_sufficient = valid_rows >= _MIN_HISTORY_ROWS_FOR_ML
         _LOGGER.debug(
-            "ML history sufficiency for %s (state history): valid_rows=%s threshold=%s sufficient=%s",
+            "ML history sufficiency for %s: state_slots=%s effective_slots=%s threshold=%s sufficient=%s",
             entity_id,
+            valid_state_rows,
             valid_rows,
             _MIN_HISTORY_ROWS_FOR_ML,
             is_sufficient,

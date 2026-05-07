@@ -316,15 +316,16 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         data_schema = vol.Schema(
             {
-                vol.Required(CONF_LONGITUDE, default=default_longitude): vol.Coerce(
-                    float
-                ),
+                
                 vol.Required(CONF_LATITUDE, default=default_latitude): vol.Coerce(
                     float
                 ),
-                vol.Required(CONF_AZIMUTH, default=124): vol.Coerce(int),
-                vol.Required(CONF_KWP, default=6.44): vol.Coerce(float),
-                vol.Required(CONF_DECLINATION, default=40): vol.Coerce(int),
+                vol.Required(CONF_LONGITUDE, default=default_longitude): vol.Coerce(
+                    float
+                ),
+                vol.Required(CONF_AZIMUTH): vol.Coerce(int),
+                vol.Required(CONF_KWP): vol.Coerce(float),
+                vol.Required(CONF_DECLINATION): vol.Coerce(int),
                 vol.Optional(CONF_API_KEY): str,
             }
         )

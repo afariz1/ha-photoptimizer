@@ -9,3 +9,5 @@ __pycache__/
 scripts/extract_pv_correction_eval.py
 scripts/html_table_to_csv.py
 tests/test_pv_hourly.py
+scripts/import_statistics_to_ha.py
+scripts/extract_growatt_chart_csv.py

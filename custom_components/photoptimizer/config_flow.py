@@ -472,7 +472,7 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_GROWATT_AC_CHARGE_SWITCH_ENTITY
                     ): selector.EntitySelector(
                         selector.EntitySelectorConfig(
-                            domain=["switch"],
+                            domain=["switch", "select"],
                             multiple=False,
                         )
                     ),

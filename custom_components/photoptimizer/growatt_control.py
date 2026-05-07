@@ -144,15 +144,17 @@ class GrowattControlAdapter(InverterControlAdapter):
         if not self._mode_entity_id:
             return
 
+        resolved_option = self._resolve_mode_option(option)
         await self._hass.services.async_call(
             "select",
             "select_option",
             {
                 "entity_id": self._mode_entity_id,
-                "option": option,
+                "option": resolved_option,
             },
             blocking=True,
         )
+        await self._async_update_solax_time_slot_if_available()
 
     async def _async_set_number(self, entity_id: str | None, value: int) -> None:
         if not entity_id:
@@ -172,6 +174,24 @@ class GrowattControlAdapter(InverterControlAdapter):
         if not self._ac_charge_switch_entity_id:
             return
 
+        if self._ac_charge_switch_entity_id.startswith("select."):
+            option = self._resolve_toggle_option(
+                self._ac_charge_switch_entity_id,
+                enabled=enabled,
+                enabled_aliases=("enabled", "on"),
+                disabled_aliases=("disabled", "off"),
+            )
+            await self._hass.services.async_call(
+                "select",
+                "select_option",
+                {
+                    "entity_id": self._ac_charge_switch_entity_id,
+                    "option": option,
+                },
+                blocking=True,
+            )
+            return
+
         service = "turn_on" if enabled else "turn_off"
         await self._hass.services.async_call(
             "switch",
@@ -185,3 +205,115 @@ class GrowattControlAdapter(InverterControlAdapter):
     def _to_percent(self, power_w: float, max_power_w: float) -> int:
         normalized = max(0.0, min(100.0, (float(power_w) / max_power_w) * 100.0))
         return int(round(normalized))
+
+    def _resolve_mode_option(self, requested: str) -> str:
+        """Map normalized Photoptimizer mode names to select options."""
+        if not self._mode_entity_id:
+            return requested
+
+        state = self._hass.states.get(self._mode_entity_id)
+        if state is None:
+            return requested
+
+        options = state.attributes.get("options")
+        if not isinstance(options, list):
+            return requested
+
+        aliases = {
+            "general": ("general", "load first", "auto", "disabled", "self use"),
+            "eco_charge": ("eco_charge", "battery first", "force charge", "charge"),
+            "eco_discharge": (
+                "eco_discharge",
+                "grid first",
+                "force discharge",
+                "discharge",
+            ),
+        }
+        normalized_to_options = {
+            str(option_value).strip().casefold(): str(option_value)
+            for option_value in options
+            if option_value is not None
+        }
+
+        for alias in aliases.get(requested, (requested,)):
+            match = normalized_to_options.get(alias.casefold())
+            if match is not None:
+                return match
+
+        return requested
+
+    def _resolve_toggle_option(
+        self,
+        entity_id: str,
+        *,
+        enabled: bool,
+        enabled_aliases: tuple[str, ...],
+        disabled_aliases: tuple[str, ...],
+    ) -> str:
+        state = self._hass.states.get(entity_id)
+        options = state.attributes.get("options") if state is not None else None
+        if not isinstance(options, list):
+            return "Enabled" if enabled else "Disabled"
+
+        normalized_to_options = {
+            str(option_value).strip().casefold(): str(option_value)
+            for option_value in options
+            if option_value is not None
+        }
+        aliases = enabled_aliases if enabled else disabled_aliases
+        for alias in aliases:
+            match = normalized_to_options.get(alias.casefold())
+            if match is not None:
+                return match
+
+        return "Enabled" if enabled else "Disabled"
+
+    async def _async_update_solax_time_slot_if_available(self) -> None:
+        """Commit SolaX Modbus time_1 local values when those entities are used."""
+        if not self._mode_entity_id or "time_1_mode" not in self._mode_entity_id:
+            return
+
+        begin_entity = self._mode_entity_id.replace("time_1_mode", "time_1_begin")
+        end_entity = self._mode_entity_id.replace("time_1_mode", "time_1_end")
+        active_entity = self._mode_entity_id.replace("time_1_mode", "time_1_active")
+        update_button_entity = self._mode_entity_id.replace("select.", "button.").replace(
+            "time_1_mode", "time_1_update"
+        )
+
+        for entity_id in (begin_entity, end_entity, active_entity, update_button_entity):
+            if self._hass.states.get(entity_id) is None:
+                return
+
+        now = dt_util.now().replace(second=0, microsecond=0)
+        end = now + timedelta(minutes=self._execution_window_minutes)
+
+        await self._hass.services.async_call(
+            "select",
+            "select_option",
+            {"entity_id": begin_entity, "option": now.strftime("%H:%M")},
+            blocking=True,
+        )
+        await self._hass.services.async_call(
+            "select",
+            "select_option",
+            {"entity_id": end_entity, "option": end.strftime("%H:%M")},
+            blocking=True,
+        )
+        active_option = self._resolve_toggle_option(
+            active_entity,
+            enabled=True,
+            enabled_aliases=("enabled", "on"),
+            disabled_aliases=("disabled", "off"),
+        )
+        await self._hass.services.async_call(
+            "select",
+            "select_option",
+            {"entity_id": active_entity, "option": active_option},
+            blocking=True,
+        )
+        await self._hass.services.async_call(
+            "button",
+            "press",
+            {"entity_id": update_button_entity},
+            blocking=True,
+        )

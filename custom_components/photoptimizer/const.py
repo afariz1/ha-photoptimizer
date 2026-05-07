@@ -5,6 +5,8 @@ DOMAIN = "photoptimizer"
 CONF_TIMEZONE = "timezone"
 
 CONF_ELECTRICITY_PRICE_ENTITY = "electricity_price_entity"
+CONF_FIXED_BUY_PRICE_KWH = "fixed_buy_price_kwh"
+CONF_FIXED_SELL_PRICE_KWH = "fixed_sell_price_kwh"
 
 CONF_LATITUDE = "latitude"
 CONF_LONGITUDE = "longitude"

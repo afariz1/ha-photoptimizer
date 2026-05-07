@@ -85,6 +85,7 @@ class EmhassClient:
         battery_charge_power_max_w: float,
         battery_discharge_power_max_w: float,
         wear_cost_per_kwh: float,
+        fixed_sell_price_kwh: float | None = None,
         deferrable_loads: list[DeferrableLoadDefinition] | None = None,
     ) -> None:
         """Store session, base URL, publish targets, and runtime defaults."""
@@ -121,6 +122,11 @@ class EmhassClient:
             DEFAULT_BATTERY_MAXIMUM_STATE_OF_CHARGE,
         )
         self._wear_cost_per_kwh = wear_cost_per_kwh
+        self._fixed_sell_price_kwh = (
+            None
+            if fixed_sell_price_kwh is None
+            else max(0.0, float(fixed_sell_price_kwh))
+        )
         self._deferrable_loads = deferrable_loads or []
 
         self._published_entities: dict[str, dict[str, str]] = {
@@ -543,7 +549,14 @@ class EmhassClient:
             "pv_power_forecast": [bucket.pv * 1000.0 for bucket in inputs.timeline],
             "load_power_forecast": [bucket.load * 1000.0 for bucket in inputs.timeline],
             "load_cost_forecast": [bucket.price for bucket in inputs.timeline],
-            "prod_price_forecast": [bucket.price * 0.9 for bucket in inputs.timeline],
+            "prod_price_forecast": [
+                (
+                    self._fixed_sell_price_kwh
+                    if self._fixed_sell_price_kwh is not None
+                    else bucket.price * 0.9
+                )
+                for bucket in inputs.timeline
+            ],
             "set_use_pv": True,
             "set_use_battery": True,
             "battery_discharge_power_max": self._battery_discharge_power_max,

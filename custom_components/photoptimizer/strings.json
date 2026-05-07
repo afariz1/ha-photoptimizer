@@ -8,6 +8,7 @@
       "cannot_connect_emhass": "Failed to connect to EMHASS",
       "auth_failed_emhass": "EMHASS rejected the provided credentials",
       "invalid_emhass": "EMHASS returned an invalid response",
+      "price_source_required": "Configure either a price entity or fixed buy price.",
       "unknown": "Unexpected error occurred"
     },
     "step": {
@@ -39,12 +40,16 @@
       },
       "electricity_price": {
         "data": {
-          "electricity_price_entity": "Electricity price entity"
+          "electricity_price_entity": "Electricity price entity",
+          "fixed_buy_price_kwh": "Fixed buy price (per kWh)",
+          "fixed_sell_price_kwh": "Fixed sell price (per kWh, optional)"
         },
         "data_description": {
-          "electricity_price_entity": "Entity with hourly electricity price forecast attributes."
+          "electricity_price_entity": "Entity with hourly electricity price forecast attributes.",
+          "fixed_buy_price_kwh": "Optional fixed import price used when no price entity is configured.",
+          "fixed_sell_price_kwh": "Optional fixed export price. If omitted, export is derived from buy price."
         },
-        "description": "Select the electricity price entity.",
+        "description": "Select a price entity or enter fixed buy/sell prices.",
         "title": "Configure electricity spot price"
       },
       "inverter": {
@@ -153,12 +158,18 @@
       },
       "init": {
         "data": {
-          "deferrable_load_count": "Deferrable load count"
+          "deferrable_load_count": "Deferrable load count",
+          "electricity_price_entity": "Electricity price entity",
+          "fixed_buy_price_kwh": "Fixed buy price (per kWh)",
+          "fixed_sell_price_kwh": "Fixed sell price (per kWh, optional)"
         },
         "data_description": {
-          "deferrable_load_count": "Number of switch-based deferrable loads to configure (0 to 2)."
+          "deferrable_load_count": "Number of switch-based deferrable loads to configure (0 to 2).",
+          "electricity_price_entity": "Entity with hourly electricity price forecast attributes.",
+          "fixed_buy_price_kwh": "Optional fixed import price used when no price entity is configured.",
+          "fixed_sell_price_kwh": "Optional fixed export price. If omitted, export is derived from buy price."
         },
-        "description": "Choose how many deferrable loads should be managed by EMHASS.",
+        "description": "Choose price source and how many deferrable loads should be managed by EMHASS.",
         "title": "Configure deferrable loads"
       }
     }

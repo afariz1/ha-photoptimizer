@@ -31,6 +31,8 @@ from .const import (
     CONF_ELECTRICITY_PRICE_ENTITY,
     CONF_EMHASS_TOKEN,
     CONF_EMHASS_URL,
+    CONF_FIXED_BUY_PRICE_KWH,
+    CONF_FIXED_SELL_PRICE_KWH,
     CONF_GROWATT_AC_CHARGE_SWITCH_ENTITY,
     CONF_GROWATT_DEVICE_ID,
     CONF_GROWATT_INVERTER_VARIANT,
@@ -68,6 +70,9 @@ _EMHASS_VALIDATION_ERRORS = {
     "connection": "cannot_connect_emhass",
     "auth": "auth_failed_emhass",
     "validation": "invalid_emhass",
+}
+_PRICE_VALIDATION_ERRORS = {
+    "missing_source": "price_source_required",
 }
 
 
@@ -196,6 +201,54 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
+            price_entity = user_input.get(CONF_ELECTRICITY_PRICE_ENTITY)
+            fixed_buy_price = user_input.get(CONF_FIXED_BUY_PRICE_KWH)
+            fixed_sell_price = user_input.get(CONF_FIXED_SELL_PRICE_KWH)
+
+            if price_entity in ("", None):
+                user_input[CONF_ELECTRICITY_PRICE_ENTITY] = None
+
+            if fixed_buy_price in ("", None):
+                user_input[CONF_FIXED_BUY_PRICE_KWH] = None
+
+            if fixed_sell_price in ("", None):
+                user_input[CONF_FIXED_SELL_PRICE_KWH] = None
+
+            if (
+                user_input.get(CONF_ELECTRICITY_PRICE_ENTITY) is None
+                and user_input.get(CONF_FIXED_BUY_PRICE_KWH) is None
+            ):
+                errors["base"] = _PRICE_VALIDATION_ERRORS["missing_source"]
+
+            if errors:
+                return self.async_show_form(
+                    step_id="electricity_price",
+                    data_schema=self.add_suggested_values_to_schema(
+                        vol.Schema(
+                            {
+                                vol.Optional(
+                                    CONF_ELECTRICITY_PRICE_ENTITY
+                                ): selector.EntitySelector(
+                                    selector.EntitySelectorConfig(
+                                        domain=["sensor"],
+                                        multiple=False,
+                                    )
+                                ),
+                                vol.Optional(CONF_FIXED_BUY_PRICE_KWH): vol.All(
+                                    vol.Coerce(float),
+                                    vol.Range(min=0),
+                                ),
+                                vol.Optional(CONF_FIXED_SELL_PRICE_KWH): vol.All(
+                                    vol.Coerce(float),
+                                    vol.Range(min=0),
+                                ),
+                            }
+                        ),
+                        user_input,
+                    ),
+                    errors=errors,
+                )
+
             _LOGGER.debug(
                 "Electricity price step received input: %s",
                 _redact_user_input(user_input),
@@ -209,11 +262,19 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         data_schema = vol.Schema(
             {
-                vol.Required(CONF_ELECTRICITY_PRICE_ENTITY): selector.EntitySelector(
+                vol.Optional(CONF_ELECTRICITY_PRICE_ENTITY): selector.EntitySelector(
                     selector.EntitySelectorConfig(
                         domain=["sensor"],
                         multiple=False,
                     )
+                ),
+                vol.Optional(CONF_FIXED_BUY_PRICE_KWH): vol.All(
+                    vol.Coerce(float),
+                    vol.Range(min=0),
+                ),
+                vol.Optional(CONF_FIXED_SELL_PRICE_KWH): vol.All(
+                    vol.Coerce(float),
+                    vol.Range(min=0),
                 ),
             }
         )
@@ -255,10 +316,10 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         data_schema = vol.Schema(
             {
-                vol.Required(CONF_LATITUDE, default=default_latitude): vol.Coerce(
+                vol.Required(CONF_LONGITUDE, default=default_longitude): vol.Coerce(
                     float
                 ),
-                vol.Required(CONF_LONGITUDE, default=default_longitude): vol.Coerce(
+                vol.Required(CONF_LATITUDE, default=default_latitude): vol.Coerce(
                     float
                 ),
                 vol.Required(CONF_AZIMUTH, default=124): vol.Coerce(int),
@@ -343,23 +404,33 @@ class PhotoptimizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             vol.Required(
                 CONF_BATTERY_SOC_RESERVE_PERCENT,
                 default=DEFAULT_BATTERY_SOC_RESERVE_PERCENT,
-            ): vol.All(vol.Coerce(float), vol.Range(min=0, max=100)),
+            ): vol.All(
+                vol.Coerce(float), vol.Range(min=0, max=100)
+            ),
             vol.Required(
                 CONF_BATTERY_EFFICIENCY_ROUND_TRIP,
                 default=DEFAULT_BATTERY_EFFICIENCY_ROUND_TRIP,
-            ): vol.All(vol.Coerce(float), vol.Range(min=1, max=100)),
+            ): vol.All(
+                vol.Coerce(float), vol.Range(min=1, max=100)
+            ),
             vol.Required(
                 CONF_BATTERY_TARGET_SOC_PERCENT,
                 default=DEFAULT_BATTERY_TARGET_SOC_PERCENT,
-            ): vol.All(vol.Coerce(float), vol.Range(min=0, max=100)),
+            ): vol.All(
+                vol.Coerce(float), vol.Range(min=0, max=100)
+            ),
             vol.Required(
                 CONF_BATTERY_CHARGE_POWER_MAX,
                 default=DEFAULT_BATTERY_CHARGE_POWER_MAX,
-            ): vol.All(vol.Coerce(float), vol.Range(min=1)),
+            ): vol.All(
+                vol.Coerce(float), vol.Range(min=1)
+            ),
             vol.Required(
                 CONF_BATTERY_DISCHARGE_POWER_MAX,
                 default=DEFAULT_BATTERY_DISCHARGE_POWER_MAX,
-            ): vol.All(vol.Coerce(float), vol.Range(min=1)),
+            ): vol.All(
+                vol.Coerce(float), vol.Range(min=1)
+            ),
             vol.Required(
                 CONF_WEAR_COST_PER_KWH,
                 default=DEFAULT_WEAR_COST_PER_KWH,
@@ -634,12 +705,68 @@ class PhotoptimizerOptionsFlow(config_entries.OptionsFlowWithReload):
         self._deferrable_loads: list[dict[str, Any]] = []
         self._deferrable_load_count = len(self._existing_deferrable_loads)
         self._deferrable_load_index = 0
+        self._electricity_price_entity = config_entry.options.get(
+            CONF_ELECTRICITY_PRICE_ENTITY,
+            config_entry.data.get(CONF_ELECTRICITY_PRICE_ENTITY),
+        )
+        self._fixed_buy_price_kwh = config_entry.options.get(
+            CONF_FIXED_BUY_PRICE_KWH,
+            config_entry.data.get(CONF_FIXED_BUY_PRICE_KWH),
+        )
+        self._fixed_sell_price_kwh = config_entry.options.get(
+            CONF_FIXED_SELL_PRICE_KWH,
+            config_entry.data.get(CONF_FIXED_SELL_PRICE_KWH),
+        )
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
         """Start the options flow."""
         if user_input is not None:
+            if user_input.get(CONF_ELECTRICITY_PRICE_ENTITY) in ("", None):
+                user_input[CONF_ELECTRICITY_PRICE_ENTITY] = None
+            if user_input.get(CONF_FIXED_BUY_PRICE_KWH) in ("", None):
+                user_input[CONF_FIXED_BUY_PRICE_KWH] = None
+            if user_input.get(CONF_FIXED_SELL_PRICE_KWH) in ("", None):
+                user_input[CONF_FIXED_SELL_PRICE_KWH] = None
+
+            if (
+                user_input.get(CONF_ELECTRICITY_PRICE_ENTITY) is None
+                and user_input.get(CONF_FIXED_BUY_PRICE_KWH) is None
+            ):
+                return self.async_show_form(
+                    step_id="init",
+                    data_schema=self.add_suggested_values_to_schema(
+                        vol.Schema(
+                            {
+                                vol.Required(
+                                    "deferrable_load_count",
+                                    default=min(self._deferrable_load_count, 2),
+                                ): vol.All(vol.Coerce(int), vol.In([0, 1, 2])),
+                                vol.Optional(
+                                    CONF_ELECTRICITY_PRICE_ENTITY
+                                ): selector.EntitySelector(
+                                    selector.EntitySelectorConfig(
+                                        domain=["sensor"],
+                                        multiple=False,
+                                    )
+                                ),
+                                vol.Optional(CONF_FIXED_BUY_PRICE_KWH): vol.All(
+                                    vol.Coerce(float), vol.Range(min=0)
+                                ),
+                                vol.Optional(CONF_FIXED_SELL_PRICE_KWH): vol.All(
+                                    vol.Coerce(float), vol.Range(min=0)
+                                ),
+                            }
+                        ),
+                        user_input,
+                    ),
+                    errors={"base": _PRICE_VALIDATION_ERRORS["missing_source"]},
+                )
+
+            self._electricity_price_entity = user_input.get(CONF_ELECTRICITY_PRICE_ENTITY)
+            self._fixed_buy_price_kwh = user_input.get(CONF_FIXED_BUY_PRICE_KWH)
+            self._fixed_sell_price_kwh = user_input.get(CONF_FIXED_SELL_PRICE_KWH)
             self._deferrable_load_count = int(user_input["deferrable_load_count"])
             self._deferrable_load_index = 0
             self._deferrable_loads = []
@@ -647,7 +774,12 @@ class PhotoptimizerOptionsFlow(config_entries.OptionsFlowWithReload):
             if self._deferrable_load_count == 0:
                 return self.async_create_entry(
                     title="",
-                    data={CONF_DEFERRABLE_LOADS: []},
+                    data={
+                        CONF_DEFERRABLE_LOADS: [],
+                        CONF_ELECTRICITY_PRICE_ENTITY: self._electricity_price_entity,
+                        CONF_FIXED_BUY_PRICE_KWH: self._fixed_buy_price_kwh,
+                        CONF_FIXED_SELL_PRICE_KWH: self._fixed_sell_price_kwh,
+                    },
                 )
 
             return await self.async_step_deferrable_load()
@@ -657,6 +789,20 @@ class PhotoptimizerOptionsFlow(config_entries.OptionsFlowWithReload):
                 vol.Required(
                     "deferrable_load_count", default=min(self._deferrable_load_count, 2)
                 ): vol.All(vol.Coerce(int), vol.In([0, 1, 2])),
+                vol.Optional(
+                    CONF_ELECTRICITY_PRICE_ENTITY,
+                    default=self._electricity_price_entity,
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain=["sensor"], multiple=False)
+                ),
+                vol.Optional(
+                    CONF_FIXED_BUY_PRICE_KWH,
+                    default=self._fixed_buy_price_kwh,
+                ): vol.All(vol.Coerce(float), vol.Range(min=0)),
+                vol.Optional(
+                    CONF_FIXED_SELL_PRICE_KWH,
+                    default=self._fixed_sell_price_kwh,
+                ): vol.All(vol.Coerce(float), vol.Range(min=0)),
             }
         )
 
@@ -673,7 +819,12 @@ class PhotoptimizerOptionsFlow(config_entries.OptionsFlowWithReload):
             if self._deferrable_load_index >= self._deferrable_load_count:
                 return self.async_create_entry(
                     title="",
-                    data={CONF_DEFERRABLE_LOADS: self._deferrable_loads},
+                    data={
+                        CONF_DEFERRABLE_LOADS: self._deferrable_loads,
+                        CONF_ELECTRICITY_PRICE_ENTITY: self._electricity_price_entity,
+                        CONF_FIXED_BUY_PRICE_KWH: self._fixed_buy_price_kwh,
+                        CONF_FIXED_SELL_PRICE_KWH: self._fixed_sell_price_kwh,
+                    },
                 )
 
             return await self.async_step_deferrable_load()

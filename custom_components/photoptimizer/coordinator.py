@@ -35,6 +35,8 @@ from .const import (
     CONF_ELECTRICITY_PRICE_ENTITY,
     CONF_EMHASS_TOKEN,
     CONF_EMHASS_URL,
+    CONF_FIXED_BUY_PRICE_KWH,
+    CONF_FIXED_SELL_PRICE_KWH,
     CONF_TIMEZONE,
     CONF_WEAR_COST_PER_KWH,
     DEFAULT_BATTERY_CHARGE_POWER_MAX,
@@ -107,6 +109,12 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
 
         return loads
 
+    def _get_entry_value(self, key: str, default: Any = None) -> Any:
+        """Return entry option override or fallback to entry data."""
+        if key in self.entry.options:
+            return self.entry.options.get(key)
+        return self.entry.data.get(key, default)
+
     def __init__(
         self, hass: HomeAssistant, entry: ConfigEntry, client: ForecastSolar
     ) -> None:
@@ -172,6 +180,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                 CONF_WEAR_COST_PER_KWH,
                 DEFAULT_WEAR_COST_PER_KWH,
             ),
+            fixed_sell_price_kwh=self._get_entry_value(CONF_FIXED_SELL_PRICE_KWH),
             deferrable_loads=self.deferrable_loads,
         )
         self.ml_forecast = MLForecastService(hass, self)
@@ -927,7 +936,10 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         now = now.replace(minute=aligned_minute)
         horizon_hours = DEFAULT_HORIZON_HOURS
 
-        price_entity = self.entry.data.get(CONF_ELECTRICITY_PRICE_ENTITY)
+        price_entity = self._get_entry_value(CONF_ELECTRICITY_PRICE_ENTITY)
+        fixed_buy_price = self._coerce_float(
+            self._get_entry_value(CONF_FIXED_BUY_PRICE_KWH)
+        )
         if price_entity:
             detected_price_horizon_hours = await self._detect_price_horizon_hours(
                 price_entity,
@@ -946,6 +958,14 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                 detected_price_horizon_hours,
                 DEFAULT_HORIZON_HOURS,
                 horizon_hours,
+            )
+        elif fixed_buy_price is not None:
+            _LOGGER.debug(
+                "Using fixed electricity buy price: %s currency/kWh", fixed_buy_price
+            )
+        else:
+            self._raise_update_failed(
+                "Missing electricity price source: configure price entity or fixed buy price"
             )
 
         bucket_count = int((horizon_hours * 60) / step_minutes)
@@ -976,6 +996,9 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                 self._raise_update_failed(
                     f"Price entity {price_entity} contains no usable price points"
                 )
+        elif fixed_buy_price is not None:
+            for bucket in timeline:
+                bucket.price = fixed_buy_price
         else:
             _LOGGER.debug("No electricity price entity configured")
 
@@ -1040,7 +1063,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         start_hour = start.replace(minute=0, second=0, microsecond=0)
         available_hours: set[datetime] = set()
 
-        for key, value in state.attributes.items():
+        for key, value in self._iter_price_points(state):
             if self._coerce_float(value) is None:
                 continue
 
@@ -1084,7 +1107,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         mapped_hours: set[datetime] = set()
         points_by_hour: dict[datetime, dict[datetime, float]] = {}
 
-        for key, value in state.attributes.items():
+        for key, value in self._iter_price_points(state):
             numeric = self._coerce_float(value)
             if numeric is None:
                 continue

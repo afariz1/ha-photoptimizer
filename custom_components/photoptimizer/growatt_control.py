@@ -49,6 +49,10 @@ class GrowattControlAdapter(InverterControlAdapter):
 
     async def async_apply(self, command: ExecutionSlotCommand) -> None:
         """Apply one battery command to Growatt entities/services."""
+        if self._uses_vpp_control():
+            await self._async_apply_vpp(command)
+            return
+
         if command.op_mode == OperationMode.FORCED_DISCHARGE:
             percent = self._to_percent(command.p_bat_cmd, self._max_discharge_power_w)
             await self._async_set_number(self._discharge_power_entity_id, percent)
@@ -76,6 +80,30 @@ class GrowattControlAdapter(InverterControlAdapter):
         await self._async_set_number(self._discharge_power_entity_id, 0)
         await self._async_set_number(self._charge_power_entity_id, 0)
         await self._async_set_ac_charge(False)
+
+    async def _async_apply_vpp(self, command: ExecutionSlotCommand) -> None:
+        """Apply one battery command via Growatt VPP entities."""
+        if command.op_mode == OperationMode.FORCED_DISCHARGE:
+            percent = self._to_percent(abs(command.p_bat_cmd), self._max_discharge_power_w)
+            await self._async_set_vpp_time(self._execution_window_minutes)
+            await self._async_set_number(self._discharge_power_entity_id, -percent)
+            await self._async_set_mode("eco_discharge")
+            await self._async_set_ac_charge(True)
+            return
+
+        if command.op_mode == OperationMode.FORCED_CHARGE:
+            percent = self._to_percent(abs(command.p_bat_cmd), self._max_charge_power_w)
+            await self._async_set_vpp_time(self._execution_window_minutes)
+            await self._async_set_number(self._charge_power_entity_id, percent)
+            await self._async_set_mode("eco_charge")
+            await self._async_set_ac_charge(True)
+            return
+
+        await self._async_set_number(self._discharge_power_entity_id, 0)
+        await self._async_set_number(self._charge_power_entity_id, 0)
+        await self._async_set_vpp_time(0)
+        await self._async_set_ac_charge(False)
+        await self._async_set_mode("general")
 
     async def _async_call_variant_service(
         self,
@@ -229,6 +257,12 @@ class GrowattControlAdapter(InverterControlAdapter):
                 "discharge",
             ),
         }
+        if self._uses_vpp_control():
+            aliases = {
+                "general": ("disabled", "off", "general"),
+                "eco_charge": ("enabled", "on", "eco_charge"),
+                "eco_discharge": ("enabled", "on", "eco_discharge"),
+            }
         normalized_to_options = {
             str(option_value).strip().casefold(): str(option_value)
             for option_value in options
@@ -270,6 +304,8 @@ class GrowattControlAdapter(InverterControlAdapter):
 
     async def _async_update_solax_time_slot_if_available(self) -> None:
         """Commit SolaX Modbus time_1 local values when those entities are used."""
+        if self._uses_vpp_control():
+            return
         if not self._mode_entity_id or "time_1_mode" not in self._mode_entity_id:
             return
 
@@ -317,3 +353,31 @@ class GrowattControlAdapter(InverterControlAdapter):
             {"entity_id": update_button_entity},
             blocking=True,
         )
+
+    async def _async_set_vpp_time(self, minutes: int) -> None:
+        """Set optional VPP runtime duration when vpp_time entity is available."""
+        entity_id = self._vpp_time_entity_id()
+        if entity_id is None:
+            return
+        await self._hass.services.async_call(
+            "number",
+            "set_value",
+            {"entity_id": entity_id, "value": int(max(0, minutes))},
+            blocking=True,
+        )
+
+    def _uses_vpp_control(self) -> bool:
+        """Return true when config points to Growatt VPP controls."""
+        return bool(self._mode_entity_id and "vpp_remote_control" in self._mode_entity_id)
+
+    def _vpp_time_entity_id(self) -> str | None:
+        """Infer vpp_time entity from configured VPP mode entity."""
+        if not self._uses_vpp_control() or not self._mode_entity_id:
+            return None
+        candidate = self._mode_entity_id.replace(
+            "vpp_remote_control",
+            "vpp_time",
+        )
+        if self._hass.states.get(candidate) is None:
+            return None
+        return candidate

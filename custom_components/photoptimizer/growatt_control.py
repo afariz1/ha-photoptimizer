@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 import logging
 
 from homeassistant.core import HomeAssistant
+from homeassistant.util import dt as dt_util
 
 from .const import GROWATT_VARIANT_MIN, GROWATT_VARIANT_SPH
 from .inverter_interface import InverterControlAdapter
@@ -85,7 +86,7 @@ class GrowattControlAdapter(InverterControlAdapter):
         if not self._growatt_device_id:
             return
 
-        now = datetime.now().replace(second=0, microsecond=0)
+        now = dt_util.now().replace(second=0, microsecond=0)
         end = now + timedelta(minutes=self._execution_window_minutes)
 
         if self._growatt_variant == GROWATT_VARIANT_MIN:

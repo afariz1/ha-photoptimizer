@@ -1,7 +1,7 @@
 {
   "domain": "photoptimizer",
   "name": "Photoptimizer",
-  "version": "0.1.18",
+  "version": "0.2.0",
   "codeowners": ["@afariz1"],
   "config_flow": true,
   "single_config_entry": true,

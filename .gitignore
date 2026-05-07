@@ -7,3 +7,5 @@ __pycache__/
 *.txt
 *.log
 scripts/extract_pv_correction_eval.py
+scripts/html_table_to_csv.py
+tests/test_pv_hourly.py

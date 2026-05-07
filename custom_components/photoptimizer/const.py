@@ -60,3 +60,35 @@ DEFAULT_BATTERY_EFFICIENCY_ROUND_TRIP = 98.0
 DEFAULT_BATTERY_CHARGE_POWER_MAX = 5000.0
 DEFAULT_BATTERY_DISCHARGE_POWER_MAX = 5000.0
 DEFAULT_EMHASS_URL = "http://localhost:5000"
+
+# Hourly PV correction (24 factors)
+PV_HOURLY_SLOTS_PER_HOUR = 4
+PV_HOURLY_W_HIST = 4.0
+PV_HOURLY_RATIO_MIN = 0.3
+PV_HOURLY_RATIO_MAX = 3.0
+PV_HOURLY_FACTOR_MIN = 0.3
+PV_HOURLY_FACTOR_MAX = 3.0
+PV_HOURLY_MIN_POWER_W = 50.0
+PV_HOURLY_STORE_VERSION = 1
+
+
+def forecast_solar_hour_wh_to_per_bucket_kwh(wh: float, buckets_in_hour: int) -> float:
+    """Spread Forecast.Solar hourly energy (Wh) across timeline buckets in that clock hour.
+
+    Full hours use a fixed quarter-hour split (``PV_HOURLY_SLOTS_PER_HOUR``). Partial
+    hours at the optimization horizon edges split ``wh`` only across buckets that exist
+    in that hour (``kWh_hour / n``), avoiding artificial power inflation.
+    """
+    if buckets_in_hour <= 0:
+        return 0.0
+    kwh_hour = float(wh) / 1000.0
+    if buckets_in_hour == PV_HOURLY_SLOTS_PER_HOUR:
+        return kwh_hour / float(PV_HOURLY_SLOTS_PER_HOUR)
+    return kwh_hour / float(buckets_in_hour)
+
+
+def pv_hourly_ewma_update(
+    factor: float, ratio: float, *, w_hist: float = PV_HOURLY_W_HIST
+) -> float:
+    """Single EWMA factor update (same weighting as the coordinator learning step)."""
+    return (w_hist * factor + ratio) / (w_hist + 1.0)

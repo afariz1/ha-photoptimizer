@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from forecast_solar import ForecastSolar, ForecastSolarError
 
@@ -118,19 +119,51 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return
 
         _LOGGER.debug("Scheduled MPC optimization triggered")
+        t_opt0 = time.monotonic()
+        optimization_ok = False
+        publish_ok = False
+        opt_ms = 0
+        pub_ms = 0
         try:
             await coordinator.async_run_mpc_optimization()
+            optimization_ok = True
             _LOGGER.debug("Scheduled MPC optimization finished successfully")
         except UpdateFailed as err:
+            opt_ms = int((time.monotonic() - t_opt0) * 1000)
             _LOGGER.warning("EMHASS MPC optimization failed: %s", err)
+            await coordinator.async_note_mpc_wave(
+                optimization_ok=False,
+                publish_ok=False,
+                optimization_duration_ms=opt_ms,
+                publish_duration_ms=0,
+                executor_result=None,
+            )
             return
 
+        opt_ms = int((time.monotonic() - t_opt0) * 1000)
         _LOGGER.debug("Scheduled MPC publish triggered")
+        t_pub0 = time.monotonic()
         try:
             await coordinator.async_run_mpc_publish()
+            publish_ok = True
             _LOGGER.debug("Scheduled MPC publish finished successfully")
         except UpdateFailed as err:
+            pub_ms = int((time.monotonic() - t_pub0) * 1000)
             _LOGGER.warning("EMHASS MPC publish-data failed: %s", err)
+        else:
+            pub_ms = int((time.monotonic() - t_pub0) * 1000)
+
+        await coordinator.async_note_mpc_wave(
+            optimization_ok=optimization_ok,
+            publish_ok=publish_ok,
+            optimization_duration_ms=opt_ms,
+            publish_duration_ms=pub_ms,
+            executor_result=(
+                coordinator.last_executor_apply_result
+                if publish_ok
+                else None
+            ),
+        )
 
     async def _async_handle_ml_daily_refresh() -> None:
         """Run one background ML daily refresh cycle."""

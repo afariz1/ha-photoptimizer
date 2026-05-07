@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 from datetime import datetime, timedelta
 from functools import partial
-import logging
 from numbers import Real
+import time
 from typing import Any, NoReturn
 
 from forecast_solar import ForecastSolar, ForecastSolarError
@@ -15,6 +17,7 @@ from homeassistant.components.recorder import get_instance, history
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, State
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
@@ -42,9 +45,18 @@ from .const import (
     DEFAULT_EMHASS_URL,
     DEFAULT_HORIZON_HOURS,
     DEFAULT_WEAR_COST_PER_KWH,
+    DOMAIN,
+    PV_HOURLY_FACTOR_MAX,
+    PV_HOURLY_FACTOR_MIN,
+    PV_HOURLY_MIN_POWER_W,
+    PV_HOURLY_RATIO_MAX,
+    PV_HOURLY_RATIO_MIN,
+    PV_HOURLY_STORE_VERSION,
+    forecast_solar_hour_wh_to_per_bucket_kwh,
+    pv_hourly_ewma_update,
 )
 from .emhass_client import DEFAULT_ML_PREDICT_PUBLISH_ENTITY_ID, EmhassClient
-from .executor import PhotoptimizerExecutor
+from .executor import ExecutorApplyResult, PhotoptimizerExecutor
 from .mlforecast import MLForecastService
 from .models import (
     DeferrableLoadDefinition,
@@ -57,18 +69,11 @@ from .models import (
 )
 
 _LOGGER = logging.getLogger(__name__)
-_PV_BIAS_MIN_FACTOR = 0.6
-_PV_BIAS_MAX_FACTOR = 1.4
-_PV_BIAS_MIN_FORECAST_W = 50.0
-_PV_BIAS_APPLY_BUCKETS = 12
 _OPTIMIZATION_TIME_STEP_MINUTES = 15
 _ML_BOOTSTRAP_TIMEOUT_SECONDS = 300
 _ML_BOOTSTRAP_MAX_ATTEMPTS = 3
 _ML_BOOTSTRAP_RETRY_DELAY_SECONDS = 30
 _LOAD_PROFILE_HISTORY_WINDOW_DAYS = 2
-
-
-PVBiasCorrectionInfo = dict[str, float | int | bool | str | None]
 
 
 class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
@@ -188,6 +193,26 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         self._last_deferrable_loads_applied: bool | None = None
         self._last_valid_battery_soc: float | None = None
         self._last_pv_forecast_series: dict[str, Any] = {}
+        self._pv_hourly_factors: list[float] = [1.0] * 24
+        self._pv_hourly_store: Store = Store(
+            hass,
+            PV_HOURLY_STORE_VERSION,
+            f"{DOMAIN}.pv_hourly_factors.{entry.entry_id}",
+        )
+        self._pv_hourly_factors_loaded: bool = False
+        self._last_pv_uncorrected_kwh: list[float] | None = None
+        self._last_timeline_first_start: datetime | None = None
+        self._last_executor_apply_result: ExecutorApplyResult | None = None
+        self._stats_window_hour: datetime | None = None
+        self._stats_cycles: int = 0
+        self._stats_opt_ok: int = 0
+        self._stats_opt_fail: int = 0
+        self._stats_pub_ok: int = 0
+        self._stats_pub_fail: int = 0
+        self._stats_opt_duration_ms: int = 0
+        self._stats_pub_duration_ms: int = 0
+        self._stats_exec_applied: int = 0
+        self._stats_exec_skipped: int = 0
         self._optimizer_enabled: bool = True
         self._ml_bootstrap_completed: bool = False
         self._ml_fit_completed: bool = False
@@ -202,6 +227,11 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
     def optimizer_enabled(self) -> bool:
         """Return whether optimization/publish should run."""
         return self._optimizer_enabled
+
+    @property
+    def last_executor_apply_result(self) -> ExecutorApplyResult | None:
+        """Outcome of the last inverter command apply attempt (after publish)."""
+        return self._last_executor_apply_result
 
     async def async_set_optimizer_enabled(self, enabled: bool) -> None:
         """Enable/disable optimization runs."""
@@ -288,8 +318,10 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                     half_threshold,
                 )
                 try:
+                    exec_res = await self.executor.async_execute_plan(cached_plan)
+                    self._last_executor_apply_result = exec_res
                     self._last_execution_applied = (
-                        await self.executor.async_execute_plan(cached_plan)
+                        exec_res == ExecutorApplyResult.APPLIED
                     )
                     self._last_execution_plan = cached_plan
                     self._last_execution_utc = dt_util.utcnow()
@@ -316,9 +348,9 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
 
         safe_plan = self._build_safe_auto_plan("publish_failure_safe_auto")
         try:
-            self._last_execution_applied = await self.executor.async_execute_plan(
-                safe_plan
-            )
+            exec_res = await self.executor.async_execute_plan(safe_plan)
+            self._last_executor_apply_result = exec_res
+            self._last_execution_applied = exec_res == ExecutorApplyResult.APPLIED
             self._last_execution_plan = safe_plan
             self._last_execution_utc = dt_util.utcnow()
         except (HomeAssistantError, RuntimeError, ValueError) as err:
@@ -639,32 +671,248 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
     def _build_pv_forecast_series_payload(
         self,
         buckets: list[OptimizationBucket],
-        uncorrected_kwh: list[float],
-        correction: PVBiasCorrectionInfo,
     ) -> dict[str, Any]:
-        """Build all PV forecast variants for dashboard/chart usage."""
-        corrected_kwh = [bucket.pv for bucket in buckets]
-        factor = float(correction.get("factor") or 1.0)
-        scaled_full_horizon_kwh = [
-            max(0.0, value * factor) for value in uncorrected_kwh
-        ]
+        """Build PV forecast series for dashboards (single hourly-corrected line)."""
+        corrected_kwh = [max(0.0, b.pv) for b in buckets]
+        factors_snapshot = [round(float(x), 6) for x in self._pv_hourly_factors]
 
         return {
             "metadata": {
-                "factor": round(factor, 4),
-                "applied": bool(correction.get("applied", False)),
-                "affected_buckets": int(correction.get("affected_buckets", 0) or 0),
-                "source_entity": correction.get("source_entity"),
-                "actual_power_w": correction.get("actual_power_w"),
-                "forecast_power_w": correction.get("forecast_power_w"),
-                "reason": correction.get("reason"),
+                "mode": "hourly24",
+                "hourly_factors": factors_snapshot,
             },
-            "uncorrected": self._build_pv_power_series(buckets, uncorrected_kwh),
-            "corrected": self._build_pv_power_series(buckets, corrected_kwh),
-            "full_horizon_scaled": self._build_pv_power_series(
-                buckets, scaled_full_horizon_kwh
-            ),
+            "series": self._build_pv_power_series(buckets, corrected_kwh),
         }
+
+    async def _async_ensure_pv_hourly_factors_loaded(self) -> None:
+        """Load persisted 24 hourly PV factors once per process."""
+        if self._pv_hourly_factors_loaded:
+            return
+        data = await self._pv_hourly_store.async_load()
+        if isinstance(data, dict):
+            raw = data.get("factors")
+            if isinstance(raw, list) and len(raw) == 24:
+                try:
+                    self._pv_hourly_factors = [float(x) for x in raw]
+                except (TypeError, ValueError):
+                    _LOGGER.debug("Invalid stored PV hourly factors, using defaults")
+        self._pv_hourly_factors_loaded = True
+
+    async def _async_save_pv_hourly_factors(self) -> None:
+        """Persist 24 hourly PV factors."""
+        await self._pv_hourly_store.async_save({"factors": self._pv_hourly_factors})
+
+    async def _async_mean_solar_power_w_interval(
+        self, entity_id: str, start: datetime, end: datetime
+    ) -> float | None:
+        """Mean PV power (W) over [start, end) from recorder, else current sensor."""
+        start_utc = dt_util.as_utc(start)
+        end_utc = dt_util.as_utc(end)
+        lower = entity_id.lower()
+        try:
+            state_history = await get_instance(self.hass).async_add_executor_job(
+                partial(
+                    history.state_changes_during_period,
+                    self.hass,
+                    start_utc,
+                    end_utc,
+                    lower,
+                    include_start_time_state=True,
+                )
+            )
+        except (OSError, RuntimeError, ValueError) as err:
+            _LOGGER.debug("Solar state history query failed: %s", err)
+            state_history = {}
+
+        rows = state_history.get(lower, [])
+        values: list[float] = []
+        for st in rows:
+            w = self._normalize_power_w(st)
+            if w is not None:
+                values.append(float(w))
+        if values:
+            return sum(values) / len(values)
+
+        state = await self._async_get_state_with_startup_wait(entity_id)
+        if state is None:
+            return None
+        return self._normalize_power_w(state)
+
+    async def _async_pv_hourly_learn_from_completed_slot(
+        self,
+        timeline: list[OptimizationBucket],
+        tz,
+        now: datetime,
+        uncorrected_pv_kwh: list[float],
+    ) -> None:
+        """EWMA-update the hour factor for the slot that ended just before this horizon."""
+        if not timeline or not uncorrected_pv_kwh:
+            return
+        completed_start = now - timedelta(minutes=_OPTIMIZATION_TIME_STEP_MINUTES)
+        if self._last_timeline_first_start is None or self._last_pv_uncorrected_kwh is None:
+            return
+        if dt_util.as_utc(self._last_timeline_first_start) != dt_util.as_utc(
+            completed_start
+        ):
+            _LOGGER.debug(
+                "PV hourly learn skipped: previous horizon start %s != completed %s",
+                self._last_timeline_first_start.isoformat(),
+                completed_start.isoformat(),
+            )
+            return
+
+        unc0 = float(self._last_pv_uncorrected_kwh[0])
+        bucket_hours = self._bucket_hours(timeline)
+        if bucket_hours <= 0:
+            return
+        forecast_w = max((unc0 / bucket_hours) * 1000.0, 0.0)
+
+        entity_id = self.entry.data.get(CONF_CURRENT_SOLAR_PRODUCTION_ENTITY)
+        if not entity_id:
+            return
+
+        slot_end = completed_start + timedelta(minutes=_OPTIMIZATION_TIME_STEP_MINUTES)
+        actual_w = await self._async_mean_solar_power_w_interval(
+            entity_id, completed_start, slot_end
+        )
+        if actual_w is None:
+            return
+
+        if (
+            forecast_w < PV_HOURLY_MIN_POWER_W
+            or actual_w < PV_HOURLY_MIN_POWER_W
+            or forecast_w <= 0
+        ):
+            return
+
+        h = int(completed_start.astimezone(tz).hour)
+        ratio = max(actual_w, 0.0) / forecast_w
+        ratio = min(max(ratio, PV_HOURLY_RATIO_MIN), PV_HOURLY_RATIO_MAX)
+        new_f = pv_hourly_ewma_update(self._pv_hourly_factors[h], ratio)
+        new_f = min(max(new_f, PV_HOURLY_FACTOR_MIN), PV_HOURLY_FACTOR_MAX)
+        if new_f != self._pv_hourly_factors[h]:
+            self._pv_hourly_factors[h] = new_f
+            await self._async_save_pv_hourly_factors()
+            _LOGGER.debug(
+                "PV hourly factor updated: hour=%s ratio=%.4f new_factor=%.4f",
+                h,
+                ratio,
+                new_f,
+            )
+
+    def _apply_pv_hourly_factors_to_timeline(
+        self,
+        timeline: list[OptimizationBucket],
+        uncorrected_kwh: list[float],
+        tz,
+    ) -> None:
+        """Scale each bucket's PV kWh using the factor for its local hour."""
+        for bucket, u_kwh in zip(timeline, uncorrected_kwh, strict=False):
+            h = int(bucket.start.astimezone(tz).hour)
+            f_h = self._pv_hourly_factors[h]
+            bucket.pv = max(0.0, float(u_kwh) * f_h)
+
+    def _log_phoptimizer_timeline(
+        self, timeline: list[OptimizationBucket], tz_name: str
+    ) -> None:
+        """One-line JSON of the final timeline sent to EMHASS (for offline MAE, etc.)."""
+        payload = {
+            "entry_id": self.entry.entry_id,
+            "timezone": tz_name,
+            "slots": [
+                {
+                    "slot_start": b.start.isoformat(),
+                    "pv_kwh": round(b.pv, 6),
+                    "load_kwh": round(b.load, 6),
+                    "price": round(b.price, 6),
+                }
+                for b in timeline
+            ],
+        }
+        _LOGGER.info(
+            "PHOTOPTIMIZER_TIMELINE %s",
+            json.dumps(payload, separators=(",", ":")),
+        )
+
+    def _reset_hourly_stats_for_window(self, window_hour: datetime) -> None:
+        """Clear accumulators for a new calendar hour window."""
+        self._stats_window_hour = window_hour
+        self._stats_cycles = 0
+        self._stats_opt_ok = 0
+        self._stats_opt_fail = 0
+        self._stats_pub_ok = 0
+        self._stats_pub_fail = 0
+        self._stats_opt_duration_ms = 0
+        self._stats_pub_duration_ms = 0
+        self._stats_exec_applied = 0
+        self._stats_exec_skipped = 0
+
+    async def _async_emit_hourly_stats(self) -> None:
+        """Log aggregated MPC / executor stats for the completed hour window."""
+        window = self._stats_window_hour
+        if window is None:
+            return
+        c = self._stats_cycles
+        payload = {
+            "entry_id": self.entry.entry_id,
+            "window_hour_utc": dt_util.as_utc(window).isoformat(),
+            "cycles": c,
+            "optimization_ok": self._stats_opt_ok,
+            "optimization_fail": self._stats_opt_fail,
+            "publish_ok": self._stats_pub_ok,
+            "publish_fail": self._stats_pub_fail,
+            "optimization_duration_ms_sum": self._stats_opt_duration_ms,
+            "publish_duration_ms_sum": self._stats_pub_duration_ms,
+            "optimization_duration_ms_avg": round(self._stats_opt_duration_ms / c, 1)
+            if c
+            else 0.0,
+            "publish_duration_ms_avg": round(self._stats_pub_duration_ms / c, 1)
+            if c
+            else 0.0,
+            "executor_commands_applied": self._stats_exec_applied,
+            "executor_commands_skipped_duplicate": self._stats_exec_skipped,
+        }
+        _LOGGER.info(
+            "PHOTOPTIMIZER_STATS %s",
+            json.dumps(payload, separators=(",", ":")),
+        )
+
+    async def async_note_mpc_wave(
+        self,
+        *,
+        optimization_ok: bool,
+        publish_ok: bool,
+        optimization_duration_ms: int,
+        publish_duration_ms: int,
+        executor_result: ExecutorApplyResult | None,
+    ) -> None:
+        """Accumulate MPC wave metrics; emit PHOTOPTIMIZER_STATS once per calendar hour."""
+        tz_name = self.entry.data.get(CONF_TIMEZONE) or self.hass.config.time_zone
+        tz = dt_util.get_time_zone(tz_name) or dt_util.UTC
+        hour_key = dt_util.now(tz).replace(minute=0, second=0, microsecond=0)
+
+        if self._stats_window_hour is not None and hour_key > self._stats_window_hour:
+            await self._async_emit_hourly_stats()
+            self._reset_hourly_stats_for_window(hour_key)
+
+        if self._stats_window_hour is None:
+            self._stats_window_hour = hour_key
+
+        self._stats_cycles += 1
+        if optimization_ok:
+            self._stats_opt_ok += 1
+        else:
+            self._stats_opt_fail += 1
+        if publish_ok:
+            self._stats_pub_ok += 1
+        else:
+            self._stats_pub_fail += 1
+        self._stats_opt_duration_ms += max(0, optimization_duration_ms)
+        self._stats_pub_duration_ms += max(0, publish_duration_ms)
+        if executor_result == ExecutorApplyResult.APPLIED:
+            self._stats_exec_applied += 1
+        elif executor_result == ExecutorApplyResult.SKIPPED_DUPLICATE:
+            self._stats_exec_skipped += 1
 
     async def _async_collect_inputs(
         self,
@@ -734,20 +982,13 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         _LOGGER.debug("Using Forecast.Solar client for PV forecast")
         raw_pv = await self.client.estimate()
         await self._hourly_from_forecast_solar(timeline, raw_pv)
-        uncorrected_pv_kwh = [bucket.pv for bucket in timeline]
-        correction_info = await self._apply_current_solar_bias_correction(timeline)
-        pv_series = self._build_pv_forecast_series_payload(
-            timeline,
-            uncorrected_pv_kwh,
-            correction_info,
+        uncorrected_pv_kwh = [float(bucket.pv) for bucket in timeline]
+        await self._async_ensure_pv_hourly_factors_loaded()
+        await self._async_pv_hourly_learn_from_completed_slot(
+            timeline, tz, now, uncorrected_pv_kwh
         )
-        _LOGGER.info("PV forecast info metadata=%s", pv_series.get("metadata"))
-        _LOGGER.info("PV forecast info uncorrected=%s", pv_series.get("uncorrected"))
-        _LOGGER.info("PV forecast info corrected=%s", pv_series.get("corrected"))
-        _LOGGER.info(
-            "PV forecast info full_horizon_scaled=%s",
-            pv_series.get("full_horizon_scaled"),
-        )
+        self._apply_pv_hourly_factors_to_timeline(timeline, uncorrected_pv_kwh, tz)
+        pv_series = self._build_pv_forecast_series_payload(timeline)
 
         load_entity = self.entry.data.get(CONF_CURRENT_CONSUMPTION_ENTITY)
         if load_entity:
@@ -769,6 +1010,10 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         _LOGGER.debug(
             "Input collection finished with %s timeline buckets", len(timeline)
         )
+
+        self._log_phoptimizer_timeline(timeline, tz_name)
+        self._last_pv_uncorrected_kwh = list(uncorrected_pv_kwh)
+        self._last_timeline_first_start = timeline[0].start if timeline else None
 
         return (
             OptimizationInputs(
@@ -906,7 +1151,8 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
             hour_start = dt_local.replace(minute=0, second=0, microsecond=0)
             target_buckets = hour_bucket_index.get(hour_start)
             if target_buckets:
-                per_bucket_kwh = (float(wh) / 1000.0) / len(target_buckets)
+                n = len(target_buckets)
+                per_bucket_kwh = forecast_solar_hour_wh_to_per_bucket_kwh(float(wh), n)
                 for bucket in target_buckets:
                     bucket.pv += per_bucket_kwh
             mapped_points += 1
@@ -927,96 +1173,6 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
         if unit == "mw":
             return numeric * 1_000_000.0
         return numeric
-
-    async def _apply_current_solar_bias_correction(
-        self,
-        buckets: list[OptimizationBucket],
-    ) -> PVBiasCorrectionInfo:
-        """Adjust near-term PV forecast from current measured production."""
-        default_result: PVBiasCorrectionInfo = {
-            "applied": False,
-            "factor": 1.0,
-            "affected_buckets": 0,
-            "source_entity": None,
-            "actual_power_w": None,
-            "forecast_power_w": None,
-            "reason": None,
-        }
-
-        if not buckets:
-            default_result["reason"] = "empty_timeline"
-            return default_result
-
-        entity_id = self.entry.data.get(CONF_CURRENT_SOLAR_PRODUCTION_ENTITY)
-        if not entity_id:
-            _LOGGER.debug("Skipping PV bias correction: no current solar entity")
-            default_result["reason"] = "missing_entity"
-            return default_result
-
-        default_result["source_entity"] = entity_id
-
-        state = await self._async_get_state_with_startup_wait(entity_id)
-        if state is None:
-            _LOGGER.debug(
-                "Skipping PV bias correction: entity %s unavailable", entity_id
-            )
-            default_result["reason"] = "entity_unavailable"
-            return default_result
-
-        actual_power_w = self._normalize_power_w(state)
-        if actual_power_w is None:
-            _LOGGER.debug(
-                "Skipping PV bias correction: invalid state for %s (%s)",
-                entity_id,
-                state.state,
-            )
-            default_result["reason"] = "invalid_actual_power"
-            return default_result
-
-        default_result["actual_power_w"] = round(actual_power_w, 2)
-
-        bucket_hours = self._bucket_hours(buckets)
-        if bucket_hours <= 0:
-            _LOGGER.debug(
-                "Skipping PV bias correction: invalid bucket_hours=%s", bucket_hours
-            )
-            default_result["reason"] = "invalid_bucket_hours"
-            return default_result
-
-        forecast_power_w = max((buckets[0].pv / bucket_hours) * 1000.0, 0.0)
-        default_result["forecast_power_w"] = round(forecast_power_w, 2)
-        if forecast_power_w < _PV_BIAS_MIN_FORECAST_W:
-            _LOGGER.debug(
-                "Skipping PV bias correction: forecast %.2f W too small",
-                forecast_power_w,
-            )
-            default_result["reason"] = "forecast_too_small"
-            return default_result
-
-        raw_factor = max(actual_power_w, 0.0) / forecast_power_w
-        factor = min(max(raw_factor, _PV_BIAS_MIN_FACTOR), _PV_BIAS_MAX_FACTOR)
-        default_result["factor"] = round(factor, 4)
-        if abs(factor - 1.0) < 0.01:
-            default_result["reason"] = "factor_close_to_one"
-            return default_result
-
-        affected = min(_PV_BIAS_APPLY_BUCKETS, len(buckets))
-        for index in range(affected):
-            buckets[index].pv = max(0.0, buckets[index].pv * factor)
-
-        default_result["applied"] = True
-        default_result["affected_buckets"] = affected
-        default_result["reason"] = "applied"
-
-        _LOGGER.debug(
-            "Applied PV bias correction from %s: actual=%.2fW forecast=%.2fW factor=%.3f affected_buckets=%s",
-            entity_id,
-            actual_power_w,
-            forecast_power_w,
-            factor,
-            affected,
-        )
-        return default_result
 
     async def _hourly_from_load_profile(
         self, buckets: list[OptimizationBucket], profile: list[float]
@@ -1548,10 +1704,12 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                     try:
                         _LOGGER.debug("Executor apply phase started")
                         executor_apply_failed = False
+                        exec_res = await self.executor.async_execute_plan(
+                            self._last_execution_plan
+                        )
+                        self._last_executor_apply_result = exec_res
                         self._last_execution_applied = (
-                            await self.executor.async_execute_plan(
-                                self._last_execution_plan
-                            )
+                            exec_res == ExecutorApplyResult.APPLIED
                         )
                         self._last_deferrable_loads_applied = (
                             await self.executor.async_execute_deferrable_loads(
@@ -1571,6 +1729,7 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                         ValueError,
                     ) as err:
                         executor_apply_failed = True
+                        self._last_executor_apply_result = None
                         self._last_execution_applied = False
                         self._last_deferrable_loads_applied = False
                         _LOGGER.warning("Executor apply failed: %s", err)

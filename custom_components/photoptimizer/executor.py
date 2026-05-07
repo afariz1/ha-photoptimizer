@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from enum import StrEnum
 import logging
 
 from homeassistant.config_entries import ConfigEntry
@@ -24,6 +25,14 @@ _LOAD_POWER_THRESHOLD_W = 50.0
 _FALLBACK_SIGNATURE_SLOT_START = datetime(1970, 7, 24, tzinfo=dt_util.UTC)
 
 
+class ExecutorApplyResult(StrEnum):
+    """Outcome of attempting to apply the current-slot inverter command."""
+
+    APPLIED = "applied"
+    SKIPPED_DUPLICATE = "skipped_duplicate"
+    NOOP = "noop"
+
+
 class PhotoptimizerExecutor:
     """Execute current-slot battery command from normalized execution plan."""
 
@@ -34,14 +43,13 @@ class PhotoptimizerExecutor:
         self._last_deferrable_signatures: dict[str, bool] = {}
         self._controller = create_inverter_adapter(hass, entry)
 
-    async def async_execute_plan(self, execution_plan: ExecutionPlan | None) -> bool:
-        """Apply current command from normalized EMHASS execution plan.
-
-        Returns True when a command was effectively sent.
-        """
+    async def async_execute_plan(
+        self, execution_plan: ExecutionPlan | None
+    ) -> ExecutorApplyResult:
+        """Apply current command from normalized EMHASS execution plan."""
         if execution_plan is None:
             _LOGGER.debug("Executor received no execution plan, skipping")
-            return False
+            return ExecutorApplyResult.NOOP
 
         now_utc = dt_util.utcnow()
         _LOGGER.debug(
@@ -93,7 +101,7 @@ class PhotoptimizerExecutor:
                 _LOGGER.debug(
                     "Executor found no current command in a valid plan, skipping apply"
                 )
-                return False
+                return ExecutorApplyResult.NOOP
 
         await self._controller.async_set_execution_window_minutes(
             execution_plan.step_minutes
@@ -114,7 +122,7 @@ class PhotoptimizerExecutor:
                 command.op_mode.value,
                 command.p_bat_cmd,
             )
-            return False
+            return ExecutorApplyResult.SKIPPED_DUPLICATE
 
         _LOGGER.info(
             "Executor applying command: slot=%s mode=%s power=%s soc_target=%s grid_limit=%s",
@@ -127,7 +135,7 @@ class PhotoptimizerExecutor:
         await self._controller.async_apply(command)
         self._last_signature = signature
         _LOGGER.info("Executor command applied successfully")
-        return True
+        return ExecutorApplyResult.APPLIED
 
     async def async_execute_deferrable_loads(
         self,

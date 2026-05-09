@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from functools import partial
 from numbers import Real
 import time
-from typing import Any, NoReturn
+from typing import Any, Iterator, NoReturn
 
 from forecast_solar import ForecastSolar, ForecastSolarError
 
@@ -548,6 +548,75 @@ class PhotoptimizerCoordinator(DataUpdateCoordinator[dict]):
                 return None
 
         return None
+
+    _PRICE_ATTR_SKIP_KEYS: frozenset[str] = frozenset(
+        {
+            "unit_of_measurement",
+            "device_class",
+            "icon",
+            "friendly_name",
+            "assumed_state",
+            "state_class",
+            "suggested_display_precision",
+            "options",
+            "restored",
+            "at",
+            "hour",
+            "mode",
+            "brightness",
+            "color_mode",
+            "supported_features",
+            "attribution",
+        }
+    )
+
+    def _scalar_price_from_attribute_value(self, raw: object) -> float | None:
+        """Normalize attribute payload to a single spot price (e.g. CZ spot order lists)."""
+        if isinstance(raw, (list, tuple)):
+            if not raw:
+                return None
+            return self._coerce_float(raw[-1])
+        if isinstance(raw, dict):
+            for subkey in ("price", "value", "cost", "state"):
+                if subkey in raw:
+                    num = self._coerce_float(raw[subkey])
+                    if num is not None:
+                        return num
+            return None
+        return self._coerce_float(raw)
+
+    def _iter_price_points(self, state: State) -> Iterator[tuple[str, float]]:
+        """Yield (timestamp_key, price) from hourly/15m spot forecast attributes.
+
+        Supports:
+        - ISO datetime string keys mapping to float (e.g. Czech Energy Spot Prices
+          ``current_*_electricity_price`` sensors).
+        - Values that are ``[interval_order, price]`` lists (order ranking sensors
+          from the same integration).
+        - One level of nested dicts whose inner keys are ISO timestamps.
+        """
+        for key, raw in state.attributes.items():
+            if key in self._PRICE_ATTR_SKIP_KEYS:
+                continue
+            key_str = str(key)
+            if dt_util.parse_datetime(key_str) is None:
+                continue
+            price = self._scalar_price_from_attribute_value(raw)
+            if price is None:
+                continue
+            yield (key_str, price)
+
+        for key, raw in state.attributes.items():
+            if key in self._PRICE_ATTR_SKIP_KEYS or not isinstance(raw, dict):
+                continue
+            for inner_key, inner_val in raw.items():
+                inner_str = str(inner_key)
+                if dt_util.parse_datetime(inner_str) is None:
+                    continue
+                price = self._scalar_price_from_attribute_value(inner_val)
+                if price is None:
+                    continue
+                yield (inner_str, price)
 
     async def _async_get_state_with_startup_wait(self, entity_id: str) -> State | None:
         """Return entity state, waiting briefly during startup for late entities."""

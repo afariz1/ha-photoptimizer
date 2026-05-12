@@ -12,3 +12,5 @@ tests/test_pv_hourly.py
 scripts/import_statistics_to_ha.py
 scripts/extract_growatt_chart_csv.py
 virtual_goodwe/
+generated/backfill_solidsun_house_load_single_statement.sql
+scripts/generate_solidsun_house_load_backfill_sql.py
